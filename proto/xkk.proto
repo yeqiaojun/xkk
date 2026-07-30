@@ -1,0 +1,363 @@
+syntax = "proto3";
+
+package xkk.v1;
+
+enum MsgId {
+  UNSPECIFIED = 0;
+  ACK_NTF = 1;
+  PING_REQ = 2;
+  PING_RSP = 3;
+  LOGIN_REQ = 4;
+  LOGIN_RSP = 5;
+  RECONNECT_REQ = 6;
+  RECONNECT_RSP = 7;
+  LOGOUT_REQ = 8;
+  LOGOUT_RSP = 9;
+  KICK_NTF = 10;
+  LOGIC_LOGIN_REQ = 20;
+  LOGIC_LOGIN_RSP = 21;
+  LOGIC_DISCONNECT_NTF = 22;
+  KICK_SESSION_REQ = 23;
+  KICK_SESSION_RSP = 24;
+  PLAYER_INFO_REQ = 100;
+  PLAYER_INFO_RSP = 101;
+  USE_ITEM_REQ = 102;
+  USE_ITEM_RSP = 103;
+  MAIL_LIST_REQ = 110;
+  MAIL_LIST_RSP = 111;
+  MAIL_READ_REQ = 112;
+  MAIL_READ_RSP = 113;
+  MAIL_DELETE_REQ = 114;
+  MAIL_DELETE_RSP = 115;
+  MAIL_CLAIM_REQ = 116;
+  MAIL_CLAIM_RSP = 117;
+  MAIL_INFO_NTF = 118;
+  ADD_ITEMS_REQ = 1000;
+  ADD_ITEMS_RSP = 1001;
+  REMOVE_ITEMS_REQ = 1002;
+  REMOVE_ITEMS_RSP = 1003;
+  CHECK_ITEMS_REQ = 1004;
+  CHECK_ITEMS_RSP = 1005;
+  SEND_MAIL_REQ = 1010;
+  SEND_MAIL_RSP = 1011;
+  MAIL_PUSH_NTF = 1012;
+  AUTH_LOGIN_REQ = 2000;
+  AUTH_LOGIN_RSP = 2001;
+  AUTH_USE_ROLE_REQ = 2002;
+  AUTH_USE_ROLE_RSP = 2003;
+  GAMER_INFO_REQ = 2100;
+  GAMER_INFO_RSP = 2101;
+  CONFIG_KEY_REQ = 2102;
+  CONFIG_KEY_RSP = 2103;
+  CONFIG_MANIFEST_REQ = 2104;
+  CONFIG_MANIFEST_RSP = 2105;
+}
+
+message Status {
+  int32 code = 1;
+  string message = 2;
+}
+
+message DeviceInfo {
+  string device_id = 1;
+  string platform = 2;
+  string client_version = 3;
+}
+
+message Endpoint {
+  string transport = 1;
+  string host = 2;
+  uint32 port = 3;
+  string path = 4;
+}
+
+message Role {
+  int64 gid = 1; // @inject_tag: bson:"gid"
+  int32 sid = 2; // @inject_tag: bson:"sid"
+  string name = 3; // @inject_tag: bson:"nm"
+  int32 level = 4; // @inject_tag: bson:"lv"
+  int32 icon = 5; // @inject_tag: bson:"ic"
+}
+
+message PlayerInfo {
+  int64 gid = 1; // @inject_tag: bson:"gid"
+  string name = 2; // @inject_tag: bson:"nm"
+  int32 level = 3; // @inject_tag: bson:"lv"
+  int32 icon = 4; // @inject_tag: bson:"ic"
+  int64 exp = 5; // @inject_tag: bson:"xp"
+}
+
+message Item {
+  int32 item_id = 1; // @inject_tag: bson:"id"
+  int64 count = 2; // @inject_tag: bson:"nm"
+  int64 change = 3; // @inject_tag: bson:"-"
+}
+
+message Mail {
+  int64 mail_id = 1; // @inject_tag: bson:"id"
+  string title = 2; // @inject_tag: bson:"title"
+  string content = 3; // @inject_tag: bson:"content"
+  int64 send_time = 4; // @inject_tag: bson:"send"
+  int64 end_time = 5; // @inject_tag: bson:"end,omitempty"
+  int32 state = 6; // @inject_tag: bson:"state"
+  repeated Item attachments = 7; // @inject_tag: bson:"items,omitempty"
+}
+
+message AckNtf {}
+
+message PingReq {
+  int64 client_time_ms = 1;
+}
+
+message PingRsp {
+  Status status = 1;
+  int64 client_time_ms = 2;
+  int64 server_time_ms = 3;
+}
+
+message LoginReq {
+  int64 gid = 1;
+  string token = 2;
+  string device_id = 3;
+}
+
+message LoginRsp {
+  Status status = 1;
+  int64 gid = 2;
+  int32 logic_id = 3;
+  int32 public_id = 4;
+  PlayerInfo player = 5;
+  repeated Item items = 6;
+  int64 session_id = 7;
+}
+
+message ReconnectReq {
+  int64 gid = 1;
+  string token = 2;
+  string device_id = 3;
+  int64 previous_session = 4;
+  uint32 ack = 5;
+}
+
+message ReconnectRsp {
+  Status status = 1;
+  uint32 replayed = 2;
+  int64 session_id = 3;
+}
+
+message LogoutReq {}
+
+message LogoutRsp {
+  Status status = 1;
+}
+
+message KickNtf {
+  int32 code = 1;
+  string reason = 2;
+}
+
+message PlayerInfoReq {}
+
+message PlayerInfoRsp {
+  Status status = 1;
+  PlayerInfo player = 2;
+  repeated Item items = 3;
+}
+
+message UseItemReq {
+  int32 item_id = 1;
+  int64 count = 2;
+}
+
+message UseItemRsp {
+  Status status = 1;
+  Item item = 2;
+}
+
+message MailListReq {}
+
+message MailListRsp {
+  Status status = 1;
+  repeated Mail mails = 2;
+}
+
+message MailReadReq {
+  repeated int64 mail_ids = 1;
+}
+
+message MailReadRsp {
+  Status status = 1;
+  repeated int64 mail_ids = 2;
+}
+
+message MailDeleteReq {
+  repeated int64 mail_ids = 1;
+}
+
+message MailDeleteRsp {
+  Status status = 1;
+  repeated int64 mail_ids = 2;
+}
+
+message MailClaimReq {
+  repeated int64 mail_ids = 1;
+}
+
+message MailClaimRsp {
+  Status status = 1;
+  repeated int64 mail_ids = 2;
+  repeated Item items = 3;
+}
+
+message MailInfoNtf {
+  repeated Mail mails = 1;
+}
+
+message LogicLoginReq {
+  int64 gid = 1;
+  int32 gate_id = 2;
+  int64 player_session = 3;
+  string device_id = 4;
+  bool reconnect = 5;
+}
+
+message LogicLoginRsp {
+  Status status = 1;
+  int32 logic_id = 2;
+  int32 old_gate_id = 3;
+  int64 old_player_session = 4;
+  PlayerInfo player = 5;
+  repeated Item items = 6;
+}
+
+message LogicDisconnectNtf {
+  int64 gid = 1;
+  int32 gate_id = 2;
+  int64 player_session = 3;
+}
+
+message KickSessionReq {
+  int64 gid = 1;
+  int64 player_session = 2;
+  int32 code = 3;
+  string reason = 4;
+}
+
+message KickSessionRsp {
+  Status status = 1;
+  bool kicked = 2;
+}
+
+message AddItemsReq {
+  int64 gid = 1;
+  repeated Item items = 2;
+  string reason = 3;
+}
+
+message AddItemsRsp {
+  Status status = 1;
+  repeated Item items = 2;
+}
+
+message RemoveItemsReq {
+  int64 gid = 1;
+  repeated Item items = 2;
+  string reason = 3;
+}
+
+message RemoveItemsRsp {
+  Status status = 1;
+  repeated Item items = 2;
+}
+
+message CheckItemsReq {
+  int64 gid = 1;
+  repeated Item items = 2;
+}
+
+message CheckItemsRsp {
+  Status status = 1;
+  bool enough = 2;
+}
+
+message SendMailReq {
+  int64 gid = 1;
+  Mail mail = 2;
+}
+
+message SendMailRsp {
+  Status status = 1;
+  int64 mail_id = 2;
+}
+
+message MailPushNtf {
+  int64 gid = 1;
+  Mail mail = 2;
+}
+
+message AuthLoginReq {
+  string account = 1;
+  string credential = 2;
+  DeviceInfo device = 3;
+}
+
+message AuthLoginRsp {
+  Status status = 1;
+  string account = 2;
+  string token = 3;
+  repeated Role roles = 4;
+  int64 created_at = 5;
+}
+
+message LoginQueue {
+  int64 position = 1;
+  int64 next_request_time = 2;
+}
+
+message AuthUseRoleReq {
+  int64 gid = 1;
+  string token = 2;
+  string device_id = 3;
+}
+
+message AuthUseRoleRsp {
+  Status status = 1;
+  int64 gid = 2;
+  repeated Endpoint endpoints = 3;
+  LoginQueue queue = 4;
+}
+
+message GamerInfoReq {
+  repeated int64 gamer_ids = 1;
+}
+
+message GamerInfoRsp {
+  Status status = 1;
+  repeated PlayerInfo players = 2;
+}
+
+message ConfigKeyReq {
+  string version = 1;
+}
+
+message ConfigKeyRsp {
+  Status status = 1;
+  string key = 2;
+}
+
+message ConfigManifestReq {
+  string version = 1;
+}
+
+message ConfigFile {
+  string name = 1; // @inject_tag: bson:"nm"
+  string path = 2; // @inject_tag: bson:"path"
+  string md5 = 3; // @inject_tag: bson:"md5"
+}
+
+message ConfigManifestRsp {
+  Status status = 1;
+  string version = 2;
+  string base_url = 3;
+  repeated ConfigFile files = 4;
+}

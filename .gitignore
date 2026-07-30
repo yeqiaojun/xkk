@@ -1,0 +1,5 @@
+/target/
+/logs/
+/.run/
+/.codex_tmp/
+*.local.yaml

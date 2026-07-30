@@ -1,0 +1,48 @@
+node:
+  cluster: local
+  instance_id: 1
+  advertise_host: 127.0.0.1
+  listen_host: 0.0.0.0
+  http_port: 3501
+  pro_version: 0
+  conf_version: 0
+
+infrastructure:
+  etcd_dsn: etcd://127.0.0.1:2379
+  mongo_dsn: mongodb://127.0.0.1:27017
+  redis_dsn: redis://127.0.0.1:6379
+  etcd_lease_ttl_seconds: 15
+
+storage:
+  mongo_database: xkk
+  account_collection: accounts
+
+capacity:
+  rpc_pending: 1024
+  max_http_body_bytes: 4096
+  max_inflight_requests: 1024
+  login_global_limit: 1000
+  login_per_ip_limit: 20
+  role_admission_limit: 200
+  gate_player_capacity: 10000
+  login_queue_capacity: 100000
+
+runtime:
+  login_rate_window_ms: 5000
+  role_admission_window_ms: 1000
+  login_queue_retry_seconds: 3
+  login_queue_entry_ttl_seconds: 30
+  account_lock_seconds: 5
+  shutdown_drain_seconds: 10
+  metrics_interval_seconds: 10
+
+security:
+  token_secret: local-xkk-token-secret
+  token_expire_seconds: 604800
+
+log:
+  level: info
+  targets: {}
+  stdout: true
+  file: logs/auth.log
+  async_queue_capacity: 8192

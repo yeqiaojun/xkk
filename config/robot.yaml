@@ -1,0 +1,8 @@
+auth_url: http://127.0.0.1:3501
+account: xkk-robot
+credential: local-robot-credential
+device_id: xkk-robot-device
+platform: windows
+client_version: xkk-robot
+transport: tcp
+timeout_seconds: 10

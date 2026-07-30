@@ -1,0 +1,16 @@
+[package]
+name = "xkk-auth"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tokio.workspace = true
+xframe.workspace = true
+xkk-cache.workspace = true
+xkk-common.workspace = true
+xkk-config.workspace = true
+xkk-persist.workspace = true
+xkk-protocol.workspace = true
+xlog.workspace = true
+xtoken = { path = "../../../deps-rust/xtoken" }

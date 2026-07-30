@@ -1,0 +1,48 @@
+[workspace]
+members = [
+    "cache",
+    "common",
+    "config",
+    "persist",
+    "protocol",
+    "robot",
+    "service/auth",
+    "service/logic",
+    "service/gate",
+    "service/public",
+    "service/query",
+    "tests/cluster-smoke",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+bytes = "1.12.1"
+http-body-util = "0.1.4"
+hyper = { version = "1.11.0", features = ["client", "http1"] }
+hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1", "tokio"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+serde_yaml = "0.9.34"
+sha2 = "0.10.9"
+thiserror = "2.0.17"
+tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+xnet = { path = "../deps-rust/xnet" }
+xproto = { path = "../deps-rust/xproto" }
+xframe = { path = "../deps-rust/xframe" }
+xlog = { path = "../deps-rust/xlog" }
+xlru = { path = "../deps-rust/xlru" }
+xmongo = { path = "../deps-rust/xmongo" }
+xkk-protocol = { path = "protocol" }
+xkk-cache = { path = "cache" }
+xkk-common = { path = "common" }
+xkk-config = { path = "config" }
+xkk-persist = { path = "persist" }
+prost = "0.14.3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

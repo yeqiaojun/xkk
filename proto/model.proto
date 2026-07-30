@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package xkk.v1;
+
+import "xkk.proto";
+
+//@rust_bson_trait account
+message AccountData {
+  string account = 1; // @inject_tag: bson:"_id"
+  string credential_hash = 2; // @inject_tag: bson:"cred"
+  repeated Role roles = 3; // @inject_tag: bson:"roles,omitempty"
+  int64 created_at = 4; // @inject_tag: bson:"ct"
+}
+
+//@rust_bson_trait player
+message PlayerData {
+  int64 gid = 1; // @inject_tag: bson:"_id"
+  PlayerInfo profile = 2; // @inject_tag: bson:"profile"
+  map<int32, int64> items = 3; // @inject_tag: bson:"items,omitempty"
+}
+
+//@rust_bson_trait mail
+message GamerMailData {
+  int64 gid = 1; // @inject_tag: bson:"_id"
+  int64 next_mail_id = 2; // @inject_tag: bson:"next"
+  repeated Mail mails = 3; // @inject_tag: bson:"mails,omitempty"
+}
+
+//@rust_bson_trait config
+message ConfigManifestData {
+  string version = 1; // @inject_tag: bson:"_id"
+  string key = 2; // @inject_tag: bson:"key"
+  string base_url = 3; // @inject_tag: bson:"url"
+  repeated ConfigFile files = 4; // @inject_tag: bson:"files,omitempty"
+}

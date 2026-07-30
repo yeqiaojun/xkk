@@ -1,0 +1,7 @@
+[package]
+name = "xkk-persist"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+xframe.workspace = true

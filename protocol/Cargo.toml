@@ -1,0 +1,15 @@
+[package]
+name = "xkk-protocol"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[dependencies]
+prost = "0.14.3"
+serde.workspace = true
+thiserror.workspace = true
+xframe.workspace = true
+xmongo.workspace = true
+
+[build-dependencies]
+prost-build = "0.14.3"

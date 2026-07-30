@@ -1,0 +1,54 @@
+node:
+  cluster: local
+  instance_id: 1
+  advertise_host: 127.0.0.1
+  listen_host: 0.0.0.0
+  pro_version: 0
+  conf_version: 0
+
+infrastructure:
+  etcd_dsn: etcd://127.0.0.1:2379
+  mongo_dsn: mongodb://127.0.0.1:27017
+  redis_dsn: redis://127.0.0.1:6379
+  etcd_lease_ttl_seconds: 15
+
+listeners:
+  tcp_port: 3201
+  kcp_port: 3202
+  websocket_port: 3203
+  websocket_path: /ws
+  primary_transport: tcp
+
+capacity:
+  rpc_pending: 100000
+  write_queue: 1024
+  max_external_handshakes: 256
+  max_external_connections: 65536
+  client_mailbox: 64
+  shutdown_cleanup_concurrency: 64
+  outbox_messages: 256
+  client_request_window_count: 15
+  client_burst_count: 8
+
+runtime:
+  shutdown_drain_seconds: 10
+  metrics_interval_seconds: 10
+  rpc_timeout_ms: 3000
+  resume_seconds: 60
+  reconnect_total: 10
+  reconnect_window_seconds: 60
+  reconnect_window_count: 5
+  client_request_window_ms: 5000
+  client_burst_window_ms: 1000
+
+security:
+  token_secret: local-xkk-token-secret
+  token_expire_seconds: 604800
+
+log:
+  level: info
+  targets:
+    xnet: debug
+  stdout: true
+  file: logs/gate.log
+  async_queue_capacity: 8192

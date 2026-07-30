@@ -1,0 +1,56 @@
+# XKK Server
+
+XKK is a Rust workspace containing five independently deployable server packages and one login client:
+
+- `xkk-auth`: HTTP account login, xtoken issuance, role admission, and Gate endpoint selection.
+- `xkk-logic`: internal service listener and bounded per-player Logic Runtime.
+- `xkk-gate`: configurable external TCP/KCP/WebSocket listeners.
+- `xkk-public`: internal mail service and shared-state listener.
+- `xkk-query`: HTTP gamer/config queries plus health and readiness probes.
+- `xkk-robot`: one-shot Auth and Gate login through a configured TCP, KCP, or WebSocket endpoint.
+
+Shared application crates are deliberately narrow:
+
+- `xkk-config`: typed YAML loading, validation, common node/infrastructure/log fields, five explicit service configs, and the robot config.
+- `xkk-cache`: shared Redis online-state and login-queue protocols.
+- `xkk-persist`: shared Mongo protobuf model loading and saving.
+- `xkk-common`: infrastructure-free time and credential helpers.
+
+Every service reads its own YAML file, connects etcd/Mongo/Redis through `xframe`, registers its
+role-specific endpoint, emits periodic structured runtime stats, and shuts down through the shared
+`xframe` signal runner.
+
+Run a service with:
+
+```powershell
+cargo run -p xkk-logic -- --config config/logic.yaml
+```
+
+Run the one-shot login robot with:
+
+```powershell
+cargo run -p xkk-robot -- --config config/robot.yaml
+```
+
+It performs Auth login, bounded use-role queue waiting, Gate login, and connection shutdown. It does
+not run smoke, pressure, reconnect, logout, or gameplay requests.
+
+Start and verify the complete local cluster against the local etcd, MongoDB, and Redis instances:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\local-cluster.ps1
+```
+
+The command builds all binaries, starts the five services in dependency order, verifies all etcd
+registrations and the three expected Hello-validated service-link edges, then runs HTTP and real
+`xnet` business smoke checks across Auth, Gate, Logic, Public, and Query. A successful Start leaves
+the cluster running. Use `-Action Status` to inspect it and `-Action Stop` to require graceful drain
+and immediate etcd deregistration. Runtime logs, smoke identity, and PIDs are kept under `.run/`.
+
+Protocol generation is deliberately pinned to `C:\work\deps-rust\tools\protoc.exe` and
+`C:\work\deps-rust\tools\protoc-gen-xmongo-trait.exe`; normal Cargo builds fail when either tool
+is missing. `proto/xkk.proto` contains wire messages and the shared `MsgId` enum;
+`proto/model.proto` contains persistence models only.
+
+The checked-in YAML files are explicit capacity contracts and local examples. Replace their DSNs,
+advertised hosts, and ports for each environment.

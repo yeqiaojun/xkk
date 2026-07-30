@@ -1,0 +1,7 @@
+[package]
+name = "xkk-common"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+sha2.workspace = true

@@ -1,0 +1,24 @@
+[package]
+name = "xkk-logic"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+prost = "0.14.3"
+thiserror.workspace = true
+tokio.workspace = true
+xkk-cache.workspace = true
+xkk-config.workspace = true
+xkk-persist.workspace = true
+xkk-protocol.workspace = true
+xframe.workspace = true
+xlog.workspace = true
+xlru.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+xmongo = { path = "../../../deps-rust/xmongo" }
+
+[[bench]]
+name = "logic_runtime"
+harness = false

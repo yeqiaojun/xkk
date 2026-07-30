@@ -1,0 +1,16 @@
+[package]
+name = "xkk-gate"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+prost = "0.14.3"
+thiserror.workspace = true
+tokio.workspace = true
+xkk-cache.workspace = true
+xkk-common.workspace = true
+xkk-config.workspace = true
+xkk-protocol.workspace = true
+xframe.workspace = true
+xlog.workspace = true
+xtoken = { path = "../../../deps-rust/xtoken" }
