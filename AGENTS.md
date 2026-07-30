@@ -12,6 +12,17 @@
 - Do not introduce a shared bootstrap crate until repeated application behavior exists beyond `xframe`.
 - All services connect etcd, Mongo, and Redis before admission and register their real published endpoint.
 
+## Module Organization
+
+- Keep each crate's `lib.rs` as its facade: module declarations, public re-exports, and only small
+  crate-wide constants belong there.
+- Move implementation into files named for a real responsibility. Keep modules private by default
+  and preserve existing public paths with `pub use`.
+- Do not split a cohesive implementation only because it is long. A deep module may have a large
+  implementation when it keeps the caller-facing interface small and the behavior local.
+- Do not widen the public interface for tests. Keep tests with the owning module or use
+  `pub(crate)` only when a crate-level test needs internal state.
+
 ## Service Topology
 
 - Gate dials Logic and Public.
