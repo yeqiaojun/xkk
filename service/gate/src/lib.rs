@@ -16,7 +16,7 @@ use xframe::{
     RpcConfig, ServiceType, ShutdownConfig,
 };
 use xkk_cache::{
-    delete_service_online, publish_service_online, refresh_service_online, service_online_ttl,
+    delete_service_online, load_service_online_counts, publish_service_online, service_online_ttl,
 };
 
 use crate::{
@@ -266,7 +266,7 @@ impl Application for GateApplication {
         publish_service_online(
             &self.redis,
             &self.cluster,
-            ServiceType::Gate,
+            ServiceType::Gate.as_i32(),
             self.instance_id,
             self.gateway.online_count(),
             service_online_ttl(self.service_load_interval),
@@ -286,18 +286,12 @@ impl Application for GateApplication {
     }
 
     async fn shutdown(&mut self, _frame: FrameHandle) -> ApplicationResult {
-        if let Some(task) = self.service_load_task.take() {
-            task.abort();
-            let _ = task.await;
-        }
-        if let Some(task) = self.metrics_task.take() {
-            task.abort();
-            let _ = task.await;
-        }
+        stop_task(&mut self.service_load_task, "Gate service load").await;
+        stop_task(&mut self.metrics_task, "Gate metrics").await;
         if let Err(error) = delete_service_online(
             &self.redis,
             &self.cluster,
-            ServiceType::Gate,
+            ServiceType::Gate.as_i32(),
             self.instance_id,
         )
         .await
@@ -307,6 +301,24 @@ impl Application for GateApplication {
         self.gateway.shutdown().await;
         Ok(())
     }
+}
+
+async fn refresh_service_online(
+    frame: &FrameHandle,
+    redis: &xframe::xredis::Client,
+    cluster: &str,
+    service_type: ServiceType,
+) -> ApplicationResult {
+    let instance_ids = frame.service_instance_ids(service_type)?;
+    let counts =
+        load_service_online_counts(redis, cluster, service_type.as_i32(), instance_ids).await?;
+    frame.update_online_counts(
+        service_type,
+        counts
+            .into_iter()
+            .map(|count| (count.instance_id, count.online_count)),
+    )?;
+    Ok(())
 }
 
 fn spawn_service_loads(
@@ -327,7 +339,7 @@ fn spawn_service_loads(
             if let Err(error) = publish_service_online(
                 &redis,
                 &cluster,
-                ServiceType::Gate,
+                ServiceType::Gate.as_i32(),
                 instance_id,
                 online_count,
                 ttl,
@@ -343,6 +355,18 @@ fn spawn_service_loads(
             }
         }
     })
+}
+
+async fn stop_task(task: &mut Option<JoinHandle<()>>, name: &'static str) {
+    let Some(task) = task.take() else {
+        return;
+    };
+    task.abort();
+    if let Err(error) = task.await
+        && !error.is_cancelled()
+    {
+        xlog::error!(task = name, %error, "Gate background task failed");
+    }
 }
 
 fn spawn_metrics(

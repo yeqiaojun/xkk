@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use thiserror::Error;
-use xframe::xredis::{self, redis};
+use xredis::{self, redis};
 
 const ONLINE_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
 const NEXT_GID_KEY: &str = "xkk:next_gid";

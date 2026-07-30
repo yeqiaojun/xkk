@@ -1,20 +1,14 @@
 use std::time::Duration;
 
-use thiserror::Error;
-use xframe::{
-    FrameHandle, ServiceType,
-    xredis::{self, redis},
-};
+use xredis::{self, redis};
 
 const SERVICE_ONLINE_PREFIX: &str = "xkk:service:online";
 const TTL_REFRESH_COUNT: u32 = 3;
 
-#[derive(Debug, Error)]
-pub enum ServiceOnlineError {
-    #[error(transparent)]
-    Frame(#[from] xframe::Error),
-    #[error(transparent)]
-    Redis(#[from] xredis::Error),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServiceOnlineCount {
+    pub instance_id: i32,
+    pub online_count: i32,
 }
 
 pub fn service_online_ttl(refresh_interval: Duration) -> Duration {
@@ -27,21 +21,19 @@ pub fn service_online_ttl(refresh_interval: Duration) -> Duration {
         .expect("service online TTL overflow")
 }
 
-fn service_online_key(cluster: &str, service_type: ServiceType) -> String {
+fn service_online_key(cluster: &str, service_type: i32) -> String {
     assert!(
         !cluster.is_empty(),
         "service online cluster must not be empty"
     );
-    format!(
-        "{SERVICE_ONLINE_PREFIX}:{cluster}:{}",
-        service_type.as_i32()
-    )
+    assert!(service_type > 0, "service type must be positive");
+    format!("{SERVICE_ONLINE_PREFIX}:{cluster}:{service_type}")
 }
 
 pub async fn publish_service_online(
     client: &xredis::Client,
     cluster: &str,
-    service_type: ServiceType,
+    service_type: i32,
     instance_id: i32,
     online_count: i32,
     ttl: Duration,
@@ -81,50 +73,43 @@ pub async fn publish_service_online(
     Ok(())
 }
 
-async fn load_service_online_counts(
+pub async fn load_service_online_counts(
     client: &xredis::Client,
     cluster: &str,
-    service_type: ServiceType,
-    instances: &[xframe::xservice::ServiceInstance],
-) -> xredis::Result<Vec<Option<i32>>> {
-    if instances.is_empty() {
+    service_type: i32,
+    instance_ids: impl IntoIterator<Item = i32>,
+) -> xredis::Result<Vec<ServiceOnlineCount>> {
+    let instance_ids = instance_ids.into_iter().collect::<Vec<_>>();
+    if instance_ids.is_empty() {
         return Ok(Vec::new());
     }
 
     let mut command = redis::cmd("HMGET");
     command.arg(service_online_key(cluster, service_type));
-    for instance in instances {
-        command.arg(instance.instance_id);
+    for instance_id in &instance_ids {
+        command.arg(instance_id);
     }
     let mut connection = client.connection();
-    command
+    let values: Vec<Option<i32>> = command
         .query_async(&mut connection)
         .await
-        .map_err(xredis::Error::from)
-}
-
-pub async fn refresh_service_online(
-    frame: &FrameHandle,
-    client: &xredis::Client,
-    cluster: &str,
-    service_type: ServiceType,
-) -> Result<(), ServiceOnlineError> {
-    let mut instances = frame.service_instances(service_type)?;
-    let online_counts =
-        load_service_online_counts(client, cluster, service_type, &instances).await?;
-    for (instance, online_count) in instances.iter_mut().zip(online_counts) {
-        if let Some(online_count) = online_count {
-            instance.online_count = online_count;
-        }
-    }
-    frame.update_service_loads(instances)?;
-    Ok(())
+        .map_err(xredis::Error::from)?;
+    Ok(instance_ids
+        .into_iter()
+        .zip(values)
+        .filter_map(|(instance_id, online_count)| {
+            online_count.map(|online_count| ServiceOnlineCount {
+                instance_id,
+                online_count,
+            })
+        })
+        .collect())
 }
 
 pub async fn delete_service_online(
     client: &xredis::Client,
     cluster: &str,
-    service_type: ServiceType,
+    service_type: i32,
     instance_id: i32,
 ) -> xredis::Result<()> {
     assert!(
@@ -147,10 +132,7 @@ mod tests {
 
     #[test]
     fn service_online_hash_is_cluster_and_type_scoped() {
-        assert_eq!(
-            service_online_key("local", ServiceType::Logic),
-            "xkk:service:online:local:2"
-        );
+        assert_eq!(service_online_key("local", 2), "xkk:service:online:local:2");
     }
 
     #[test]

@@ -5,4 +5,4 @@ edition.workspace = true
 
 [dependencies]
 thiserror.workspace = true
-xframe.workspace = true
+xredis.workspace = true

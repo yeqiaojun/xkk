@@ -9,6 +9,9 @@
   snapshot, and chooses the healthy Gate with the lowest refreshed count. It never opens a Gate
   link or writes dynamic load to etcd.
 - Keep queue and rate budgets explicit in YAML and reject overload before expensive account work.
+- Keep `lib.rs` as the public package surface, `service.rs` as process composition/lifecycle, and
+  `api.rs` as the cohesive login/use-role workflow. Do not split individual workflow steps into
+  tiny modules.
 
 ## Future Work
 

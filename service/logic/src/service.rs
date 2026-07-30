@@ -188,7 +188,7 @@ impl Application for LogicApplication {
         publish_service_online(
             &self.redis,
             &self.cluster,
-            ServiceType::Logic,
+            ServiceType::Logic.as_i32(),
             self.instance_id,
             online_count,
             service_online_ttl(self.service_load_interval),
@@ -218,24 +218,18 @@ impl Application for LogicApplication {
     }
 
     async fn shutdown(&mut self, frame: FrameHandle) -> ApplicationResult {
-        if let Some(task) = self.service_load_task.take() {
-            task.abort();
-            let _ = task.await;
-        }
+        stop_task(&mut self.service_load_task, "Logic service load").await;
         if let Err(error) = delete_service_online(
             &self.redis,
             &self.cluster,
-            ServiceType::Logic,
+            ServiceType::Logic.as_i32(),
             self.instance_id,
         )
         .await
         {
             xlog::warn!(%error, "Logic service online cleanup failed");
         }
-        if let Some(task) = self.metrics_task.take() {
-            task.abort();
-            let _ = task.await;
-        }
+        stop_task(&mut self.metrics_task, "Logic metrics").await;
         self.runtime
             .shutdown(self.shutdown_timeout)
             .await
@@ -272,7 +266,7 @@ fn spawn_service_online(
             if let Err(error) = publish_service_online(
                 &redis,
                 &cluster,
-                ServiceType::Logic,
+                ServiceType::Logic.as_i32(),
                 instance_id,
                 online_count,
                 ttl,
@@ -283,6 +277,18 @@ fn spawn_service_online(
             }
         }
     })
+}
+
+async fn stop_task(task: &mut Option<JoinHandle<()>>, name: &'static str) {
+    let Some(task) = task.take() else {
+        return;
+    };
+    task.abort();
+    if let Err(error) = task.await
+        && !error.is_cancelled()
+    {
+        xlog::error!(task = name, %error, "Logic background task failed");
+    }
 }
 
 fn spawn_metrics(

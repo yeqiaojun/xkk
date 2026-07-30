@@ -32,6 +32,7 @@ thiserror = "2.0.17"
 tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 xnet = { path = "../deps-rust/xnet" }
 xproto = { path = "../deps-rust/xproto" }
+xredis = { path = "../deps-rust/xredis" }
 xframe = { path = "../deps-rust/xframe" }
 xlog = { path = "../deps-rust/xlog" }
 xlru = { path = "../deps-rust/xlru" }

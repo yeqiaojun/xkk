@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use xframe::xredis::{self, redis};
+use xredis::{self, redis};
 
 const LOGIN_QUEUE_KEY: &str = "xkk:login_queue";
 

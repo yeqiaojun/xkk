@@ -6,7 +6,9 @@
 - `robot` is a one-shot login client. It must not grow stress, smoke, reconnect, logout, or business-module loops.
 - `config` owns all typed YAML models, shared configuration fields, loading, validation, and log option conversion.
 - Each service owns only its listeners, discovery watches, role-specific `xframe` composition, and application lifecycle.
-- `cache` owns shared Redis protocols, `persist` owns shared Mongo model access, and `common` contains infrastructure-free helpers.
+- `cache` owns shared Redis protocols and depends directly on xredis; it must not know FrameHandle
+  or mutate xservice. `persist` owns shared Mongo model access, and `common` contains
+  infrastructure-free helpers.
 - Do not introduce a shared bootstrap crate until repeated application behavior exists beyond `xframe`.
 - All services connect etcd, Mongo, and Redis before admission and register their real published endpoint.
 
@@ -26,7 +28,7 @@
   keyed by instance ID. The hash TTL covers three refresh intervals; graceful shutdown removes
   the publisher field.
 - Gate refreshes discovered Logic counts and Auth refreshes discovered Gate counts, then overlays
-  them into each process's local xservice snapshot through `FrameHandle::update_service_loads`.
+  them into each process's local xservice snapshot through `FrameHandle::update_online_counts`.
 - Consumers use one `HMGET` for the currently discovered instance IDs. A Redis read failure or one
   missing field keeps the last local value; discovery lease removal remains authoritative for
   removing dead instances and makes stale hash fields irrelevant to selection.
