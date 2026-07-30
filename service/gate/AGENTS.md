@@ -3,6 +3,8 @@
 - Gate binds only external client listeners; it has no internal service listener.
 - TCP, KCP, and WebSocket may be enabled together with one configured port per transport.
 - Gate is the dial owner for Gate-to-Logic and Gate-to-Public links.
+- Gate publishes its own online count to Redis and refreshes discovered Logic counts into its
+  local xservice snapshot. Dynamic load must not update etcd.
 - Gate authenticates Login/Reconnect, binds the xnet player route, and forwards Player/Item RPC to
   Logic and Mail RPC to Public.
 - Login and Reconnect responses publish the Gate-side session ID required by the next reconnect.

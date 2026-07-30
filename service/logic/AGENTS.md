@@ -8,6 +8,8 @@
 - Shutdown must stop Logic admission and flush dirty players before xrpc and storage close.
 - Login arbitration, old-session kick routing, player persistence, online ownership, and final
   dirty/inflight metrics remain owned here.
+- Logic publishes its local online count to the shared TTL-backed Redis service-load protocol;
+  metrics logging and etcd registration remain independent of that publisher.
 
 ## Future Work
 

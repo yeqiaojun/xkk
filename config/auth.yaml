@@ -34,6 +34,7 @@ runtime:
   login_queue_entry_ttl_seconds: 30
   account_lock_seconds: 5
   shutdown_drain_seconds: 10
+  service_load_interval_seconds: 3
   metrics_interval_seconds: 10
 
 security:

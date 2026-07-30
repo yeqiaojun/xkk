@@ -47,6 +47,7 @@ pub struct AuthRuntime {
     pub login_queue_entry_ttl_seconds: u64,
     pub account_lock_seconds: u64,
     pub shutdown_drain_seconds: u64,
+    pub service_load_interval_seconds: u64,
     pub metrics_interval_seconds: u64,
 }
 
@@ -88,6 +89,7 @@ impl AuthConfig {
             || self.runtime.login_queue_entry_ttl_seconds == 0
             || self.runtime.account_lock_seconds == 0
             || self.runtime.shutdown_drain_seconds == 0
+            || self.runtime.service_load_interval_seconds == 0
         {
             return Err(invalid(SERVICE, "runtime windows must be positive"));
         }

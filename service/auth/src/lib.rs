@@ -8,7 +8,9 @@ use xframe::{
     xmongo::{self, mongodb::bson::Document},
     xservice::ServiceStatus,
 };
-use xkk_cache::{allocate_gid, enqueue_login, leave_login_queue, load_online, set_token};
+use xkk_cache::{
+    allocate_gid, enqueue_login, leave_login_queue, load_online, refresh_service_online, set_token,
+};
 use xkk_common::{credential_hash, unix_millis, unix_seconds};
 pub use xkk_config::AuthConfig as Config;
 use xkk_persist::{load_model, save_model};
@@ -79,6 +81,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
     let log_options = config.log.options("logs/auth.log");
     let frame_config = frame_config(&config)?;
     let cluster = config.node.cluster.clone();
+    let service_load_interval = Duration::from_secs(config.runtime.service_load_interval_seconds);
     let metrics_interval = Duration::from_secs(config.runtime.metrics_interval_seconds);
     let instance_id = config.node.instance_id;
     let max_body_bytes = config.capacity.max_http_body_bytes;
@@ -93,6 +96,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
         let redis = frame
             .redis()
             .expect("Auth FrameConfig always enables Redis");
+        let application_redis = redis.clone();
         let api = AuthApi::new(frame.clone(), mongo, redis, &config);
         let login = api.clone();
         let use_role = api.clone();
@@ -120,7 +124,13 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
             })?;
         prepared.set_http_app(http)?;
         let frame = prepared
-            .start(AuthApplication::new(cluster, metrics_interval, api))
+            .start(AuthApplication::new(
+                cluster,
+                application_redis,
+                service_load_interval,
+                metrics_interval,
+                api,
+            ))
             .await?;
         xlog::info!(instance_id, "Auth service started");
         let shutdown = frame.run_until_shutdown_signal().await;
@@ -509,17 +519,29 @@ fn use_role_error(error_code: i32, message: &'static str) -> pb::AuthUseRoleRsp 
 
 struct AuthApplication {
     cluster: String,
+    redis: xframe::xredis::Client,
+    service_load_interval: Duration,
     metrics_interval: Duration,
     api: AuthApi,
+    service_load_task: Option<JoinHandle<()>>,
     metrics_task: Option<JoinHandle<()>>,
 }
 
 impl AuthApplication {
-    fn new(cluster: String, metrics_interval: Duration, api: AuthApi) -> Self {
+    fn new(
+        cluster: String,
+        redis: xframe::xredis::Client,
+        service_load_interval: Duration,
+        metrics_interval: Duration,
+        api: AuthApi,
+    ) -> Self {
         Self {
             cluster,
+            redis,
+            service_load_interval,
             metrics_interval,
             api,
+            service_load_task: None,
             metrics_task: None,
         }
     }
@@ -528,17 +550,48 @@ impl AuthApplication {
 impl Application for AuthApplication {
     async fn start(&mut self, frame: FrameHandle) -> ApplicationResult {
         frame.watch(self.cluster.clone(), ServiceType::Gate).await?;
+        refresh_service_online(&frame, &self.redis, &self.cluster, ServiceType::Gate).await?;
+        self.service_load_task = Some(spawn_service_loads(
+            frame.clone(),
+            self.redis.clone(),
+            self.cluster.clone(),
+            self.service_load_interval,
+        ));
         self.metrics_task = spawn_metrics(frame, self.api.clone(), self.metrics_interval);
         Ok(())
     }
 
     async fn shutdown(&mut self, _frame: FrameHandle) -> ApplicationResult {
+        if let Some(task) = self.service_load_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
         if let Some(task) = self.metrics_task.take() {
             task.abort();
             let _ = task.await;
         }
         Ok(())
     }
+}
+
+fn spawn_service_loads(
+    frame: FrameHandle,
+    redis: xframe::xredis::Client,
+    cluster: String,
+    interval: Duration,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            if let Err(error) =
+                refresh_service_online(&frame, &redis, &cluster, ServiceType::Gate).await
+            {
+                xlog::warn!(%error, "Auth Gate online refresh failed");
+            }
+        }
+    })
 }
 
 fn spawn_metrics(frame: FrameHandle, api: AuthApi, interval: Duration) -> Option<JoinHandle<()>> {
@@ -573,6 +626,7 @@ mod tests {
 
         assert!(frame.http.is_some());
         assert!(frame.service_server.is_none());
+        assert_eq!(config.runtime.service_load_interval_seconds, 3);
         assert_eq!(
             frame.node.meta_data().get("login_path").unwrap(),
             LOGIN_PATH

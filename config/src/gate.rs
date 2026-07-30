@@ -74,6 +74,7 @@ pub struct GateCapacity {
 #[serde(deny_unknown_fields)]
 pub struct GateRuntime {
     pub shutdown_drain_seconds: u64,
+    pub service_load_interval_seconds: u64,
     pub metrics_interval_seconds: u64,
     pub rpc_timeout_ms: u64,
     pub resume_seconds: u64,
@@ -147,6 +148,7 @@ impl GateConfig {
             return Err(invalid(SERVICE, "capacity values must be positive"));
         }
         if self.runtime.shutdown_drain_seconds == 0
+            || self.runtime.service_load_interval_seconds == 0
             || self.runtime.rpc_timeout_ms == 0
             || self.runtime.resume_seconds == 0
             || self.runtime.reconnect_total == 0

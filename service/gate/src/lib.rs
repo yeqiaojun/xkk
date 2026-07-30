@@ -15,6 +15,9 @@ use xframe::{
     Application, ApplicationResult, DiscoveryConfig, FrameConfig, FrameHandle, NodeConfig,
     RpcConfig, ServiceType, ShutdownConfig,
 };
+use xkk_cache::{
+    delete_service_online, publish_service_online, refresh_service_online, service_online_ttl,
+};
 
 use crate::{
     gateway::{Gateway, GatewaySettings},
@@ -167,6 +170,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
     let session_config = session_config(&config);
     let gateway_settings = gateway_settings(&config);
     let cluster = config.node.cluster.clone();
+    let service_load_interval = Duration::from_secs(config.runtime.service_load_interval_seconds);
     let metrics_interval = Duration::from_secs(config.runtime.metrics_interval_seconds);
     let instance_id = config.node.instance_id;
     let log_guard = xlog::init_global(log_options)?;
@@ -178,6 +182,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
         let redis = handle
             .redis()
             .expect("Gate FrameConfig always enables Redis");
+        let application_redis = redis.clone();
         let online_count = Arc::new(AtomicI32::new(0));
         let sessions = ClientSessions::new(session_config);
         let gateway = Gateway::new(
@@ -191,7 +196,14 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
         gateway.register_rpc(prepared.rpc())?;
         prepared.add_server(network_server, gateway.clone());
         let frame = prepared
-            .start(GateApplication::new(cluster, metrics_interval, gateway))
+            .start(GateApplication::new(
+                cluster,
+                instance_id,
+                application_redis,
+                service_load_interval,
+                metrics_interval,
+                gateway,
+            ))
             .await?;
         xlog::info!(instance_id, "Gate service started");
         let shutdown = frame.run_until_shutdown_signal().await;
@@ -212,17 +224,32 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
 
 struct GateApplication {
     cluster: String,
+    instance_id: i32,
+    redis: xframe::xredis::Client,
+    service_load_interval: Duration,
     metrics_interval: Duration,
     gateway: Gateway,
+    service_load_task: Option<JoinHandle<()>>,
     metrics_task: Option<JoinHandle<()>>,
 }
 
 impl GateApplication {
-    fn new(cluster: String, metrics_interval: Duration, gateway: Gateway) -> Self {
+    fn new(
+        cluster: String,
+        instance_id: i32,
+        redis: xframe::xredis::Client,
+        service_load_interval: Duration,
+        metrics_interval: Duration,
+        gateway: Gateway,
+    ) -> Self {
         Self {
             cluster,
+            instance_id,
+            redis,
+            service_load_interval,
             metrics_interval,
             gateway,
+            service_load_task: None,
             metrics_task: None,
         }
     }
@@ -236,18 +263,86 @@ impl Application for GateApplication {
         frame
             .watch_and_connect(self.cluster.clone(), ServiceType::Public)
             .await?;
+        publish_service_online(
+            &self.redis,
+            &self.cluster,
+            ServiceType::Gate,
+            self.instance_id,
+            self.gateway.online_count(),
+            service_online_ttl(self.service_load_interval),
+        )
+        .await?;
+        refresh_service_online(&frame, &self.redis, &self.cluster, ServiceType::Logic).await?;
+        self.service_load_task = Some(spawn_service_loads(
+            frame.clone(),
+            self.redis.clone(),
+            self.cluster.clone(),
+            self.instance_id,
+            self.gateway.clone(),
+            self.service_load_interval,
+        ));
         self.metrics_task = spawn_metrics(frame, self.gateway.clone(), self.metrics_interval);
         Ok(())
     }
 
     async fn shutdown(&mut self, _frame: FrameHandle) -> ApplicationResult {
-        self.gateway.shutdown().await;
+        if let Some(task) = self.service_load_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
         if let Some(task) = self.metrics_task.take() {
             task.abort();
             let _ = task.await;
         }
+        if let Err(error) = delete_service_online(
+            &self.redis,
+            &self.cluster,
+            ServiceType::Gate,
+            self.instance_id,
+        )
+        .await
+        {
+            xlog::warn!(%error, "Gate service online cleanup failed");
+        }
+        self.gateway.shutdown().await;
         Ok(())
     }
+}
+
+fn spawn_service_loads(
+    frame: FrameHandle,
+    redis: xframe::xredis::Client,
+    cluster: String,
+    instance_id: i32,
+    gateway: Gateway,
+    interval: Duration,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let ttl = service_online_ttl(interval);
+        let mut ticker = tokio::time::interval(interval);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let online_count = gateway.online_count();
+            if let Err(error) = publish_service_online(
+                &redis,
+                &cluster,
+                ServiceType::Gate,
+                instance_id,
+                online_count,
+                ttl,
+            )
+            .await
+            {
+                xlog::warn!(online_count, %error, "Gate service online publish failed");
+            }
+            if let Err(error) =
+                refresh_service_online(&frame, &redis, &cluster, ServiceType::Logic).await
+            {
+                xlog::warn!(%error, "Gate Logic online refresh failed");
+            }
+        }
+    })
 }
 
 fn spawn_metrics(
@@ -266,9 +361,6 @@ fn spawn_metrics(
             let expired = gateway.sessions().prune_expired(Instant::now());
             let sessions = gateway.sessions().stats();
             let online_count = gateway.online_count();
-            if let Err(error) = frame.update_online_count(online_count).await {
-                xlog::warn!(%error, "Gate online count publish failed");
-            }
             let stats = frame.stats();
             xlog::info!(
                 frame_state = ?stats.state,
@@ -301,6 +393,7 @@ mod tests {
         assert_eq!(server.listeners.len(), 3);
         assert!(frame.service_server.is_none());
         assert_eq!(frame.node.port(), 3201);
+        assert_eq!(config.runtime.service_load_interval_seconds, 3);
         assert_eq!(frame.service_client_transport.write_queue_capacity, 1024);
         assert_eq!(
             frame.node.meta_data().get("primary_transport").unwrap(),

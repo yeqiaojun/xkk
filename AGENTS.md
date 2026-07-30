@@ -18,6 +18,19 @@
 - Query has no internal service connection.
 - The acceptor watches dialer identities for Hello admission. Do not add mutual connection intents.
 
+## Dynamic Service Load
+
+- etcd owns instance discovery, endpoints, versions, health, and leases only. Online counts must not
+  produce registry updates.
+- Logic and Gate publish their own online count to one Redis Hash per cluster and service type,
+  keyed by instance ID. The hash TTL covers three refresh intervals; graceful shutdown removes
+  the publisher field.
+- Gate refreshes discovered Logic counts and Auth refreshes discovered Gate counts, then overlays
+  them into each process's local xservice snapshot through `FrameHandle::update_service_loads`.
+- Consumers use one `HMGET` for the currently discovered instance IDs. A Redis read failure or one
+  missing field keeps the last local value; discovery lease removal remains authoritative for
+  removing dead instances and makes stale hash fields irrelevant to selection.
+
 ## Logic
 
 - The bounded per-player Logic Runtime belongs in `xkk-logic`, not `deps-rust`.

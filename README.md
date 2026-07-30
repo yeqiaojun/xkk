@@ -12,13 +12,18 @@ XKK is a Rust workspace containing five independently deployable server packages
 Shared application crates are deliberately narrow:
 
 - `xkk-config`: typed YAML loading, validation, common node/infrastructure/log fields, five explicit service configs, and the robot config.
-- `xkk-cache`: shared Redis online-state and login-queue protocols.
+- `xkk-cache`: shared Redis player online-state, service-load, and login-queue protocols.
 - `xkk-persist`: shared Mongo protobuf model loading and saving.
 - `xkk-common`: infrastructure-free time and credential helpers.
 
 Every service reads its own YAML file, connects etcd/Mongo/Redis through `xframe`, registers its
 role-specific endpoint, emits periodic structured runtime stats, and shuts down through the shared
 `xframe` signal runner.
+
+etcd carries stable discovery and lease data. Logic and Gate publish online counts to TTL-backed
+Redis hashes keyed by instance ID; Gate and Auth periodically load discovered instance fields into
+their own local xservice snapshots for minimum-online routing without generating etcd watch
+updates.
 
 Run a service with:
 

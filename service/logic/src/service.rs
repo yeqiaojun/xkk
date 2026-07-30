@@ -15,6 +15,7 @@ use xframe::{
     Application, ApplicationResult, DiscoveryConfig, FrameConfig, FrameHandle, NodeConfig,
     RpcConfig, ServiceType, ShutdownConfig,
 };
+use xkk_cache::{delete_service_online, publish_service_online, service_online_ttl};
 
 use crate::{LogicConfig, LogicRuntime, player};
 pub use xkk_config::LogicConfig as Config;
@@ -98,6 +99,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
     let frame_config = frame_config(&config)?;
     let logic_config = logic_config(&config);
     let cluster = config.node.cluster.clone();
+    let service_load_interval = Duration::from_secs(config.runtime.service_load_interval_seconds);
     let metrics_interval = Duration::from_secs(config.runtime.metrics_interval_seconds);
     let shutdown_timeout = Duration::from_secs(config.runtime.shutdown_drain_seconds);
     let rpc_timeout = Duration::from_millis(config.runtime.rpc_timeout_ms);
@@ -115,6 +117,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
         let redis = handle
             .redis()
             .expect("Logic FrameConfig always enables Redis");
+        let application_redis = redis.clone();
         let runtime = LogicRuntime::new(
             logic_config,
             player::persistence(mongo, mongo_database, player_collection),
@@ -130,14 +133,19 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
             rpc_timeout,
         )?;
         let frame = prepared
-            .start(LogicApplication::new(
+            .start(LogicApplication {
                 cluster,
+                instance_id,
+                redis: application_redis,
+                service_load_interval,
                 metrics_interval,
                 shutdown_timeout,
                 logic_config,
                 runtime,
                 online_count,
-            ))
+                service_load_task: None,
+                metrics_task: None,
+            })
             .await?;
         xlog::info!(instance_id, "Logic service started");
         let shutdown = frame.run_until_shutdown_signal().await;
@@ -158,33 +166,16 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
 
 struct LogicApplication {
     cluster: String,
+    instance_id: i32,
+    redis: xframe::xredis::Client,
+    service_load_interval: Duration,
     metrics_interval: Duration,
     shutdown_timeout: Duration,
     logic_config: LogicConfig,
     runtime: LogicRuntime<player::PlayerState, player::PlayerError>,
     online_count: Arc<AtomicI32>,
+    service_load_task: Option<JoinHandle<()>>,
     metrics_task: Option<JoinHandle<()>>,
-}
-
-impl LogicApplication {
-    fn new(
-        cluster: String,
-        metrics_interval: Duration,
-        shutdown_timeout: Duration,
-        logic_config: LogicConfig,
-        runtime: LogicRuntime<player::PlayerState, player::PlayerError>,
-        online_count: Arc<AtomicI32>,
-    ) -> Self {
-        Self {
-            cluster,
-            metrics_interval,
-            shutdown_timeout,
-            logic_config,
-            runtime,
-            online_count,
-            metrics_task: None,
-        }
-    }
 }
 
 impl Application for LogicApplication {
@@ -193,6 +184,23 @@ impl Application for LogicApplication {
         frame
             .watch_and_connect(self.cluster.clone(), ServiceType::Public)
             .await?;
+        let online_count = self.online_count.load(Ordering::Acquire);
+        publish_service_online(
+            &self.redis,
+            &self.cluster,
+            ServiceType::Logic,
+            self.instance_id,
+            online_count,
+            service_online_ttl(self.service_load_interval),
+        )
+        .await?;
+        self.service_load_task = Some(spawn_service_online(
+            self.redis.clone(),
+            self.cluster.clone(),
+            self.instance_id,
+            self.online_count.clone(),
+            self.service_load_interval,
+        ));
         xlog::info!(
             resident_players = self.logic_config.resident_capacity,
             max_dirty_players = self.logic_config.max_dirty_players,
@@ -210,6 +218,20 @@ impl Application for LogicApplication {
     }
 
     async fn shutdown(&mut self, frame: FrameHandle) -> ApplicationResult {
+        if let Some(task) = self.service_load_task.take() {
+            task.abort();
+            let _ = task.await;
+        }
+        if let Err(error) = delete_service_online(
+            &self.redis,
+            &self.cluster,
+            ServiceType::Logic,
+            self.instance_id,
+        )
+        .await
+        {
+            xlog::warn!(%error, "Logic service online cleanup failed");
+        }
         if let Some(task) = self.metrics_task.take() {
             task.abort();
             let _ = task.await;
@@ -233,6 +255,36 @@ impl Application for LogicApplication {
     }
 }
 
+fn spawn_service_online(
+    redis: xframe::xredis::Client,
+    cluster: String,
+    instance_id: i32,
+    online_count: Arc<AtomicI32>,
+    interval: Duration,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let ttl = service_online_ttl(interval);
+        let mut ticker = tokio::time::interval(interval);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            let online_count = online_count.load(Ordering::Acquire);
+            if let Err(error) = publish_service_online(
+                &redis,
+                &cluster,
+                ServiceType::Logic,
+                instance_id,
+                online_count,
+                ttl,
+            )
+            .await
+            {
+                xlog::warn!(online_count, %error, "Logic service online publish failed");
+            }
+        }
+    })
+}
+
 fn spawn_metrics(
     frame: FrameHandle,
     runtime: LogicRuntime<player::PlayerState, player::PlayerError>,
@@ -248,9 +300,6 @@ fn spawn_metrics(
         loop {
             ticker.tick().await;
             let online = online_count.load(Ordering::Acquire);
-            if let Err(error) = frame.update_online_count(online).await {
-                xlog::warn!(online, %error, "Logic online count publish failed");
-            }
             let frame_stats = frame.stats();
             let logic_stats = runtime.stats();
             xlog::info!(
@@ -297,6 +346,7 @@ mod config_tests {
         assert_eq!(config.storage.mongo_database, "xkk");
         assert_eq!(config.storage.player_collection, "players");
         assert_eq!(config.runtime.rpc_timeout_ms, 3000);
+        assert_eq!(config.runtime.service_load_interval_seconds, 3);
         assert_eq!(frame.rpc.pending_capacity(), 100_000);
         assert_eq!(frame.service_client_transport.write_queue_capacity, 1024);
         assert!(frame.service_server.is_some());
