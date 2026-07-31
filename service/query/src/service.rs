@@ -28,6 +28,8 @@ pub enum ServiceError {
     Mongo(#[from] xframe::xmongo::Error),
     #[error(transparent)]
     Redis(#[from] xframe::xredis::Error),
+    #[error(transparent)]
+    Protocol(#[from] xkk_protocol::ProtocolError),
 }
 
 fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
@@ -81,6 +83,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
     let log_guard = xlog::init_global(log_options)?;
 
     let service: Result<(), ServiceError> = async {
+        xkk_protocol::init_global_registry()?;
         let mut prepared = xframe::prepare(frame_config).await?;
         let handle = prepared.handle();
         let mongo = handle
@@ -143,9 +146,9 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
         let frame = prepared
             .start(QueryApplication::new(metrics_interval, api))
             .await?;
-        xlog::info!(instance_id, "Query service started");
+        tracing::info!(instance_id, "Query service started");
         let shutdown = frame.run_until_shutdown_signal().await;
-        xlog::info!(
+        tracing::info!(
             instance_id,
             success = shutdown.is_ok(),
             "Query service stopped"
@@ -201,7 +204,7 @@ fn spawn_metrics(frame: FrameHandle, api: QueryApi, interval: Duration) -> Optio
         loop {
             ticker.tick().await;
             let stats = frame.stats();
-            xlog::info!(
+            tracing::info!(
                 frame_state = ?stats.state,
                 available_request_slots = api.available_request_slots(),
                 active_sessions = stats.sessions.active_sessions,

@@ -6,8 +6,10 @@
 - `/v1/auth/login` issues the repository's xtoken. `/v1/auth/use-role` validates both xtoken
   contents and the Redis `gamer:{gid}` token before returning every configured Gate transport.
 - Auth periodically reads discovered Gate online counts from Redis, overlays its local xservice
-  snapshot, and chooses the healthy Gate with the lowest refreshed count. It never opens a Gate
-  link or writes dynamic load to etcd.
+  snapshot, and chooses the healthy Gate with the lowest refreshed count. Each admission also
+  increments the selected Gate in the local snapshot so a burst does not reuse one stale minimum;
+  the next Redis refresh reconciles the estimate. Auth never opens a Gate link or writes dynamic
+  load to etcd.
 - Keep queue and rate budgets explicit in YAML and reject overload before expensive account work.
 - Keep `lib.rs` as the public package surface, `service.rs` as process composition/lifecycle, and
   `api.rs` as the cohesive login/use-role workflow. Do not split individual workflow steps into

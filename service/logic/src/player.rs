@@ -4,7 +4,7 @@ use std::{
         Arc,
         atomic::{AtomicI32, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use prost::Message;
@@ -12,11 +12,11 @@ use thiserror::Error;
 use xframe::{FrameHandle, ServiceType, xmongo, xrpc::RpcManager};
 use xkk_cache::set_logic_owner;
 use xkk_persist::{load_model, save_model};
-use xkk_protocol::{MsgId, code, error_status, ok_status, pb};
+use xkk_protocol::{code, error_status, ok_status, pb};
 
 use crate::{
     Completed, LogicCall, LogicCallError, LogicRuntime, LogicState, Persistence, RejectReason,
-    SavePlayer,
+    SavePlayer, stats::LoginMetrics,
 };
 
 const KIB: usize = 1024;
@@ -259,22 +259,31 @@ pub(crate) fn persistence(
     mongo: xmongo::Client,
     database: String,
     collection_name: String,
+    metrics: Arc<LoginMetrics>,
 ) -> Persistence<PlayerState, PlayerError> {
     let collection =
         mongo.collection::<xmongo::mongodb::bson::Document>(&database, &collection_name);
     let load_collection = collection.clone();
+    let load_metrics = metrics;
     Persistence::new(
         move |gid| {
             let collection = load_collection.clone();
+            let metrics = load_metrics.clone();
             async move {
-                let data = match load_model::<pb::PlayerData>(&collection, gid).await? {
+                let find_started = Instant::now();
+                let loaded = load_model::<pb::PlayerData>(&collection, gid).await;
+                metrics.mongo_find.record(find_started.elapsed());
+                let data = match loaded? {
                     Some(mut data) => {
                         normalize_player(gid, &mut data);
                         data
                     }
                     None => {
                         let data = default_player(gid);
-                        save_model(&collection, &data).await?;
+                        let create_started = Instant::now();
+                        let created = save_model(&collection, &data).await;
+                        metrics.mongo_create.record(create_started.elapsed());
+                        created?;
                         data
                     }
                 };
@@ -302,20 +311,21 @@ pub(crate) fn register_handlers(
     logic_id: i32,
     online_count: Arc<AtomicI32>,
     rpc_timeout: Duration,
+    login_metrics: Arc<LoginMetrics>,
 ) -> xframe::xrpc::Result<()> {
     let login_runtime = runtime.clone();
     let login_frame = frame.clone();
     let login_redis = redis.clone();
     let login_online = online_count.clone();
-    rpc.register_pair::<pb::LogicLoginReq, pb::LogicLoginRsp, _, _>(
-        MsgId::LogicLoginReq.as_u32(),
-        MsgId::LogicLoginRsp.as_u32(),
-        move |ctx, request| {
+    let login_stats = login_metrics;
+    rpc.register_typed::<pb::LogicLoginReq, _, _>(move |ctx, request| {
             let runtime = login_runtime.clone();
             let frame = login_frame.clone();
             let redis = login_redis.clone();
             let online_count = login_online.clone();
+            let metrics = login_stats.clone();
             async move {
+                let total_started = Instant::now();
                 if request.gid <= 0
                     || request.gate_id <= 0
                     || request.player_session <= 0
@@ -332,6 +342,7 @@ pub(crate) fn register_handlers(
                 let new_session = request.player_session;
                 let reconnect = request.reconnect;
                 let kick_frame = frame.clone();
+                let runtime_started = Instant::now();
                 let call = runtime.try_use_preloaded(
                     gid,
                     retained_kib(&request),
@@ -349,19 +360,17 @@ pub(crate) fn register_handlers(
                                     reason: "session replaced".to_string(),
                                 };
                                 if let Err(error) = kick_frame
-                                    .call_player_to::<_, pb::KickSessionRsp>(
+                                    .call_player_to_typed(
                                         ServiceType::Gate,
                                         old.gate_id,
                                         gid,
                                         old.session_id,
-                                        MsgId::KickSessionReq.as_u32(),
-                                        MsgId::KickSessionRsp.as_u32(),
                                         &kick,
                                         rpc_timeout,
                                     )
                                     .await
                                 {
-                                    xlog::debug!(gid, old_gate = old.gate_id, %error, "Logic old Gate kick failed");
+                                    tracing::debug!(gid, old_gate = old.gate_id, %error, "Logic old Gate kick failed");
                                 }
                             }
                             Ok(old)
@@ -377,7 +386,9 @@ pub(crate) fn register_handlers(
                         result
                     },
                 );
-                let result = match await_logic(call).await {
+                let result = await_logic(call).await;
+                metrics.runtime_wait.record(runtime_started.elapsed());
+                let result = match result {
                     Ok(result) => result,
                     Err(status) => {
                         return Ok(pb::LogicLoginRsp {
@@ -389,8 +400,11 @@ pub(crate) fn register_handlers(
                 if result.became_online {
                     online_count.fetch_add(1, Ordering::AcqRel);
                 }
-                if let Err(error) = set_logic_owner(&redis, gid, logic_id).await {
-                    xlog::error!(gid, logic_id, %error, "Logic Redis owner save failed");
+                let owner_started = Instant::now();
+                let owner_result = set_logic_owner(&redis, gid, logic_id).await;
+                metrics.redis_owner.record(owner_started.elapsed());
+                if let Err(error) = owner_result {
+                    tracing::error!(gid, logic_id, %error, "Logic Redis owner save failed");
                     if let Ok(call) = runtime.try_use(gid, 1, move |player| {
                         player.disconnect(new_gate, new_session)
                     }) && await_logic(Ok(call)).await.unwrap_or(false)
@@ -402,89 +416,77 @@ pub(crate) fn register_handlers(
                         ..Default::default()
                     });
                 }
+                metrics.total.record(total_started.elapsed());
                 Ok(result.response)
             }
-        },
-    )?;
+        })?;
 
     let disconnect_runtime = runtime.clone();
     let disconnect_online = online_count.clone();
-    rpc.register_send::<pb::LogicDisconnectNtf, _, _>(
-        MsgId::LogicDisconnectNtf.as_u32(),
-        move |_ctx, request| {
-            let runtime = disconnect_runtime.clone();
-            let online_count = disconnect_online.clone();
-            async move {
-                if request.gid <= 0 || request.gate_id <= 0 || request.player_session <= 0 {
-                    return Ok(());
-                }
-                if let Ok(call) = runtime.try_use(request.gid, 1, move |player| {
-                    player.disconnect(request.gate_id, request.player_session)
-                }) && await_logic(Ok(call)).await.unwrap_or(false)
-                {
-                    decrement_online(&online_count);
-                }
-                Ok(())
+    rpc.register_notification::<pb::LogicDisconnectNtf, _, _>(move |_ctx, request| {
+        let runtime = disconnect_runtime.clone();
+        let online_count = disconnect_online.clone();
+        async move {
+            if request.gid <= 0 || request.gate_id <= 0 || request.player_session <= 0 {
+                return Ok(());
             }
-        },
-    )?;
+            if let Ok(call) = runtime.try_use(request.gid, 1, move |player| {
+                player.disconnect(request.gate_id, request.player_session)
+            }) && await_logic(Ok(call)).await.unwrap_or(false)
+            {
+                decrement_online(&online_count);
+            }
+            Ok(())
+        }
+    })?;
 
     let player_runtime = runtime.clone();
-    rpc.register_pair::<pb::PlayerInfoReq, pb::PlayerInfoRsp, _, _>(
-        MsgId::PlayerInfoReq.as_u32(),
-        MsgId::PlayerInfoRsp.as_u32(),
-        move |ctx, _request| {
-            let runtime = player_runtime.clone();
-            async move {
-                let Some(gid) = valid_context_gid(&ctx) else {
-                    return Ok(pb::PlayerInfoRsp {
-                        status: Some(error_status(code::INVALID_ARGUMENT, "missing player route")),
+    rpc.register_typed::<pb::PlayerInfoReq, _, _>(move |ctx, _request| {
+        let runtime = player_runtime.clone();
+        async move {
+            let Some(gid) = valid_context_gid(&ctx) else {
+                return Ok(pb::PlayerInfoRsp {
+                    status: Some(error_status(code::INVALID_ARGUMENT, "missing player route")),
+                    ..Default::default()
+                });
+            };
+            Ok(
+                match await_logic(runtime.try_use(gid, 1, |player| player.player_info())).await {
+                    Ok(response) => response,
+                    Err(status) => pb::PlayerInfoRsp {
+                        status: Some(status),
                         ..Default::default()
-                    });
-                };
-                Ok(
-                    match await_logic(runtime.try_use(gid, 1, |player| player.player_info())).await
-                    {
-                        Ok(response) => response,
-                        Err(status) => pb::PlayerInfoRsp {
-                            status: Some(status),
-                            ..Default::default()
-                        },
                     },
-                )
-            }
-        },
-    )?;
+                },
+            )
+        }
+    })?;
 
     let use_runtime = runtime.clone();
-    rpc.register_pair::<pb::UseItemReq, pb::UseItemRsp, _, _>(
-        MsgId::UseItemReq.as_u32(),
-        MsgId::UseItemRsp.as_u32(),
-        move |ctx, request| {
-            let runtime = use_runtime.clone();
-            async move {
-                let Some(gid) = valid_context_gid(&ctx) else {
-                    return Ok(pb::UseItemRsp {
-                        status: Some(error_status(code::INVALID_ARGUMENT, "missing player route")),
+    rpc.register_typed::<pb::UseItemReq, _, _>(move |ctx, request| {
+        let runtime = use_runtime.clone();
+        async move {
+            let Some(gid) = valid_context_gid(&ctx) else {
+                return Ok(pb::UseItemRsp {
+                    status: Some(error_status(code::INVALID_ARGUMENT, "missing player route")),
+                    ..Default::default()
+                });
+            };
+            Ok(
+                match await_logic(runtime.try_use(gid, retained_kib(&request), move |player| {
+                    player.use_item(request)
+                }))
+                .await
+                {
+                    Ok(response) => response,
+                    Err(status) => pb::UseItemRsp {
+                        status: Some(status),
                         ..Default::default()
-                    });
-                };
-                Ok(
-                    match await_logic(runtime.try_use(gid, retained_kib(&request), move |player| {
-                        player.use_item(request)
-                    }))
-                    .await
-                    {
-                        Ok(response) => response,
-                        Err(status) => pb::UseItemRsp {
-                            status: Some(status),
-                            ..Default::default()
-                        },
                     },
-                )
-            }
-        },
-    )?;
+                },
+            )
+        }
+    })?;
 
     register_item_handlers(rpc, runtime)?;
     Ok(())
@@ -495,112 +497,100 @@ fn register_item_handlers(
     runtime: LogicRuntime<PlayerState, PlayerError>,
 ) -> xframe::xrpc::Result<()> {
     let add_runtime = runtime.clone();
-    rpc.register_pair::<pb::AddItemsReq, pb::AddItemsRsp, _, _>(
-        MsgId::AddItemsReq.as_u32(),
-        MsgId::AddItemsRsp.as_u32(),
-        move |ctx, request| {
-            let runtime = add_runtime.clone();
-            async move {
-                let gid = request.gid;
-                if gid <= 0 || (ctx.head.gid != 0 && ctx.head.gid != gid as u64) {
-                    return Ok(pb::AddItemsRsp {
-                        status: Some(error_status(
-                            code::INVALID_ARGUMENT,
-                            "invalid add-items route",
-                        )),
-                        items: Vec::new(),
-                    });
-                }
-                let retained = retained_kib(&request);
-                let items = request.items;
-                Ok(
-                    match await_logic(
-                        runtime.try_use(gid, retained, move |player| player.add_items(items)),
-                    )
-                    .await
-                    {
-                        Ok(response) => response,
-                        Err(status) => pb::AddItemsRsp {
-                            status: Some(status),
-                            items: Vec::new(),
-                        },
-                    },
-                )
+    rpc.register_typed::<pb::AddItemsReq, _, _>(move |ctx, request| {
+        let runtime = add_runtime.clone();
+        async move {
+            let gid = request.gid;
+            if gid <= 0 || (ctx.head.gid != 0 && ctx.head.gid != gid as u64) {
+                return Ok(pb::AddItemsRsp {
+                    status: Some(error_status(
+                        code::INVALID_ARGUMENT,
+                        "invalid add-items route",
+                    )),
+                    items: Vec::new(),
+                });
             }
-        },
-    )?;
+            let retained = retained_kib(&request);
+            let items = request.items;
+            Ok(
+                match await_logic(
+                    runtime.try_use(gid, retained, move |player| player.add_items(items)),
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(status) => pb::AddItemsRsp {
+                        status: Some(status),
+                        items: Vec::new(),
+                    },
+                },
+            )
+        }
+    })?;
 
     let remove_runtime = runtime.clone();
-    rpc.register_pair::<pb::RemoveItemsReq, pb::RemoveItemsRsp, _, _>(
-        MsgId::RemoveItemsReq.as_u32(),
-        MsgId::RemoveItemsRsp.as_u32(),
-        move |ctx, request| {
-            let runtime = remove_runtime.clone();
-            async move {
-                let gid = request.gid;
-                if gid <= 0 || (ctx.head.gid != 0 && ctx.head.gid != gid as u64) {
-                    return Ok(pb::RemoveItemsRsp {
-                        status: Some(error_status(
-                            code::INVALID_ARGUMENT,
-                            "invalid remove-items route",
-                        )),
-                        items: Vec::new(),
-                    });
-                }
-                let retained = retained_kib(&request);
-                let items = request.items;
-                Ok(
-                    match await_logic(
-                        runtime.try_use(gid, retained, move |player| player.remove_items(items)),
-                    )
-                    .await
-                    {
-                        Ok(response) => response,
-                        Err(status) => pb::RemoveItemsRsp {
-                            status: Some(status),
-                            items: Vec::new(),
-                        },
-                    },
-                )
+    rpc.register_typed::<pb::RemoveItemsReq, _, _>(move |ctx, request| {
+        let runtime = remove_runtime.clone();
+        async move {
+            let gid = request.gid;
+            if gid <= 0 || (ctx.head.gid != 0 && ctx.head.gid != gid as u64) {
+                return Ok(pb::RemoveItemsRsp {
+                    status: Some(error_status(
+                        code::INVALID_ARGUMENT,
+                        "invalid remove-items route",
+                    )),
+                    items: Vec::new(),
+                });
             }
-        },
-    )?;
+            let retained = retained_kib(&request);
+            let items = request.items;
+            Ok(
+                match await_logic(
+                    runtime.try_use(gid, retained, move |player| player.remove_items(items)),
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(status) => pb::RemoveItemsRsp {
+                        status: Some(status),
+                        items: Vec::new(),
+                    },
+                },
+            )
+        }
+    })?;
 
     let check_runtime = runtime;
-    rpc.register_pair::<pb::CheckItemsReq, pb::CheckItemsRsp, _, _>(
-        MsgId::CheckItemsReq.as_u32(),
-        MsgId::CheckItemsRsp.as_u32(),
-        move |ctx, request| {
-            let runtime = check_runtime.clone();
-            async move {
-                let gid = request.gid;
-                if gid <= 0 || (ctx.head.gid != 0 && ctx.head.gid != gid as u64) {
-                    return Ok(pb::CheckItemsRsp {
-                        status: Some(error_status(
-                            code::INVALID_ARGUMENT,
-                            "invalid check-items route",
-                        )),
-                        enough: false,
-                    });
-                }
-                let retained = retained_kib(&request);
-                let items = request.items;
-                Ok(
-                    match await_logic(
-                        runtime.try_use(gid, retained, move |player| player.check_items(items)),
-                    )
-                    .await
-                    {
-                        Ok(response) => response,
-                        Err(status) => pb::CheckItemsRsp {
-                            status: Some(status),
-                            enough: false,
-                        },
-                    },
-                )
+    rpc.register_typed::<pb::CheckItemsReq, _, _>(move |ctx, request| {
+        let runtime = check_runtime.clone();
+        async move {
+            let gid = request.gid;
+            if gid <= 0 || (ctx.head.gid != 0 && ctx.head.gid != gid as u64) {
+                return Ok(pb::CheckItemsRsp {
+                    status: Some(error_status(
+                        code::INVALID_ARGUMENT,
+                        "invalid check-items route",
+                    )),
+                    enough: false,
+                });
             }
-        },
-    )?;
+            let retained = retained_kib(&request);
+            let items = request.items;
+            Ok(
+                match await_logic(
+                    runtime.try_use(gid, retained, move |player| player.check_items(items)),
+                )
+                .await
+                {
+                    Ok(response) => response,
+                    Err(status) => pb::CheckItemsRsp {
+                        status: Some(status),
+                        enough: false,
+                    },
+                },
+            )
+        }
+    })?;
     Ok(())
 }
 

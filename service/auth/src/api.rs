@@ -111,7 +111,7 @@ impl AuthApi {
             (Ok(global), Ok(per_ip)) if global.allowed && per_ip.allowed => {}
             (Ok(_), Ok(_)) => return login_error(code::RATE_LIMITED, "login rate exceeded"),
             (Err(error), _) | (_, Err(error)) => {
-                xlog::error!(account = %request.account, %error, "Auth login limiter failed");
+                tracing::error!(account = %request.account, %error, "Auth login limiter failed");
                 return login_error(code::INTERNAL, "login limiter failed");
             }
         }
@@ -134,16 +134,16 @@ impl AuthApi {
         let token = match self.token.simple_token_encode(role.gid, &device.device_id) {
             Ok(token) => token,
             Err(error) => {
-                xlog::error!(gid = role.gid, %error, "Auth token encode failed");
+                tracing::error!(gid = role.gid, %error, "Auth token encode failed");
                 return login_error(code::INTERNAL, "token encode failed");
             }
         };
         if let Err(error) = set_token(&self.redis, role.gid, &account.account, &token).await {
-            xlog::error!(gid = role.gid, %error, "Auth Redis token save failed");
+            tracing::error!(gid = role.gid, %error, "Auth Redis token save failed");
             return login_error(code::INTERNAL, "token save failed");
         }
 
-        xlog::info!(
+        tracing::info!(
             account = %account.account,
             gid = role.gid,
             client_ip = %ip,
@@ -174,7 +174,7 @@ impl AuthApi {
                 ));
             }
             Err(error) => {
-                xlog::error!(account, %error, "Auth account lock failed");
+                tracing::error!(account, %error, "Auth account lock failed");
                 return Err(error_status(code::INTERNAL, "account lock failed"));
             }
         };
@@ -183,7 +183,7 @@ impl AuthApi {
             .load_or_create_account_locked(account, credential)
             .await;
         if let Err(error) = lock.release().await {
-            xlog::warn!(account, %error, "Auth account lock release failed");
+            tracing::warn!(account, %error, "Auth account lock release failed");
         }
         result
     }
@@ -199,7 +199,7 @@ impl AuthApi {
             Ok(Some(_)) => Err(error_status(code::UNAUTHENTICATED, "credential mismatch")),
             Ok(None) => {
                 let gid = allocate_gid(&self.redis).await.map_err(|error| {
-                    xlog::error!(account, %error, "Auth gid allocation failed");
+                    tracing::error!(account, %error, "Auth gid allocation failed");
                     error_status(code::INTERNAL, "gid allocation failed")
                 })?;
                 let account = pb::AccountData {
@@ -215,13 +215,13 @@ impl AuthApi {
                     created_at: unix_seconds(),
                 };
                 save_model(&self.accounts, &account).await.map_err(|error| {
-                    xlog::error!(account = %account.account, %error, "Auth account create failed");
+                    tracing::error!(account = %account.account, %error, "Auth account create failed");
                     error_status(code::INTERNAL, "account create failed")
                 })?;
                 Ok(account)
             }
             Err(error) => {
-                xlog::error!(account, %error, "Auth account load failed");
+                tracing::error!(account, %error, "Auth account load failed");
                 Err(error_status(code::INTERNAL, "account load failed"))
             }
         }
@@ -249,7 +249,7 @@ impl AuthApi {
             Ok(Some(online)) if online.token == request.token => {}
             Ok(_) => return use_role_error(code::UNAUTHENTICATED, "token state mismatch"),
             Err(error) => {
-                xlog::error!(gid = request.gid, %error, "Auth online state load failed");
+                tracing::error!(gid = request.gid, %error, "Auth online state load failed");
                 return use_role_error(code::INTERNAL, "online state load failed");
             }
         }
@@ -257,7 +257,7 @@ impl AuthApi {
         let gates = match self.frame.service_instances(ServiceType::Gate) {
             Ok(gates) => gates,
             Err(error) => {
-                xlog::warn!(gid = request.gid, %error, "Auth Gate discovery unavailable");
+                tracing::warn!(gid = request.gid, %error, "Auth Gate discovery unavailable");
                 return use_role_error(code::TEMPORARILY_UNAVAILABLE, "Gate unavailable");
             }
         };
@@ -276,7 +276,7 @@ impl AuthApi {
         {
             Ok(position) => position,
             Err(error) => {
-                xlog::error!(gid = request.gid, %error, "Auth login queue failed");
+                tracing::error!(gid = request.gid, %error, "Auth login queue failed");
                 return use_role_error(code::INTERNAL, "login queue failed");
             }
         };
@@ -309,15 +309,18 @@ impl AuthApi {
                 };
             }
             Err(error) => {
-                xlog::error!(gid = request.gid, %error, "Auth role admission failed");
+                tracing::error!(gid = request.gid, %error, "Auth role admission failed");
                 return use_role_error(code::INTERNAL, "role admission failed");
             }
         }
 
-        let gate = match self.frame.pick_min_online_discovered(ServiceType::Gate) {
+        let gate = match self
+            .frame
+            .pick_min_online_discovered_and_increment(ServiceType::Gate)
+        {
             Ok(gate) => gate,
             Err(error) => {
-                xlog::warn!(gid = request.gid, %error, "Auth Gate selection failed");
+                tracing::warn!(gid = request.gid, %error, "Auth Gate selection failed");
                 return use_role_error(code::TEMPORARILY_UNAVAILABLE, "Gate unavailable");
             }
         };
@@ -326,9 +329,9 @@ impl AuthApi {
             return use_role_error(code::TEMPORARILY_UNAVAILABLE, "Gate endpoint unavailable");
         }
         if let Err(error) = leave_login_queue(&self.redis, request.gid).await {
-            xlog::warn!(gid = request.gid, %error, "Auth login queue removal failed");
+            tracing::warn!(gid = request.gid, %error, "Auth login queue removal failed");
         }
-        xlog::info!(
+        tracing::info!(
             gid = request.gid,
             gate_id = gate.instance_id,
             endpoints = endpoints.len(),

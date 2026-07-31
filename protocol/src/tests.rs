@@ -5,7 +5,7 @@ use xmongo::BsonPathGetter;
 
 #[test]
 fn msg_ids_are_generated_from_proto() {
-    assert_eq!(MsgId::AckNtf.as_u16(), 1);
+    assert_eq!(MsgId::AckNtf.as_u16(), 3000);
     assert_eq!(MsgId::PlayerInfoReq.as_u16(), 100);
     assert_eq!(MsgId::ConfigManifestRsp.as_u16(), 2105);
     assert_eq!(MsgId::PlayerInfoReq.as_str_name(), "PLAYER_INFO_REQ");
@@ -39,10 +39,35 @@ fn only_control_range_bypasses_outbox() {
 }
 
 #[test]
-fn client_registry_has_every_client_message() {
+fn client_registry_has_every_generated_message() {
     let registry = client_registry().unwrap();
     let body = prost::Message::encode_to_vec(&pb::PingReq { client_time_ms: 7 });
     assert!(registry.decode(MsgId::PingReq.as_u16(), &body).is_ok());
+
+    for raw in 1..=u16::MAX {
+        let Some(msgid) = from_u16(raw) else {
+            continue;
+        };
+        let (name, _) = registry.format_json(raw, &[]);
+        assert_ne!(name, "UNKNOWN", "message {msgid:?} was not registered");
+    }
+}
+
+#[test]
+fn generated_message_mapping_is_bidirectional() {
+    assert_eq!(message_id::<pb::PingReq>(), Some(MsgId::PingReq));
+
+    let ping = new_message(MsgId::PingReq).unwrap();
+    assert!(ping.downcast_ref::<pb::PingReq>().is_some());
+    assert_eq!(message_id_of(ping.as_ref()), Some(MsgId::PingReq));
+
+    for raw in 1..=u16::MAX {
+        let Some(msgid) = from_u16(raw) else {
+            continue;
+        };
+        let message = new_message(msgid).expect("generated message must have a factory");
+        assert_eq!(message_id_of(message.as_ref()), Some(msgid));
+    }
 }
 
 #[test]

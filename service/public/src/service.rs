@@ -27,6 +27,8 @@ pub enum ServiceError {
     Redis(#[from] xframe::xredis::Error),
     #[error(transparent)]
     Rpc(#[from] xframe::xrpc::Error),
+    #[error(transparent)]
+    Protocol(#[from] xkk_protocol::ProtocolError),
 }
 
 fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
@@ -82,6 +84,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
     let log_guard = xlog::init_global(log_options)?;
 
     let service: Result<(), ServiceError> = async {
+        xkk_protocol::init_global_registry()?;
         let prepared = xframe::prepare(frame_config).await?;
         let handle = prepared.handle();
         let mongo = handle
@@ -108,9 +111,9 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
         let frame = prepared
             .start(PublicApplication::new(cluster, metrics_interval))
             .await?;
-        xlog::info!(instance_id, "Public service started");
+        tracing::info!(instance_id, "Public service started");
         let shutdown = frame.run_until_shutdown_signal().await;
-        xlog::info!(
+        tracing::info!(
             instance_id,
             success = shutdown.is_ok(),
             "Public service stopped"
@@ -170,7 +173,7 @@ fn spawn_metrics(frame: FrameHandle, interval: Duration) -> Option<JoinHandle<()
         loop {
             ticker.tick().await;
             let stats = frame.stats();
-            xlog::info!(
+            tracing::info!(
                 frame_state = ?stats.state,
                 active_sessions = stats.sessions.active_sessions,
                 write_queue_depth = stats.sessions.outbound_queue_depth,

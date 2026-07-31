@@ -28,6 +28,8 @@ pub enum ServiceError {
     Mongo(#[from] xmongo::Error),
     #[error(transparent)]
     Redis(#[from] xframe::xredis::Error),
+    #[error(transparent)]
+    Protocol(#[from] xkk_protocol::ProtocolError),
 }
 
 fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
@@ -80,6 +82,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
     let log_guard = xlog::init_global(log_options)?;
 
     let service: Result<(), ServiceError> = async {
+        xkk_protocol::init_global_registry()?;
         let mut prepared = xframe::prepare(frame_config).await?;
         let frame = prepared.handle();
         let mongo = frame
@@ -124,9 +127,9 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
                 api,
             ))
             .await?;
-        xlog::info!(instance_id, "Auth service started");
+        tracing::info!(instance_id, "Auth service started");
         let shutdown = frame.run_until_shutdown_signal().await;
-        xlog::info!(
+        tracing::info!(
             instance_id,
             success = shutdown.is_ok(),
             "Auth service stopped"
@@ -224,7 +227,7 @@ fn spawn_service_loads(
             if let Err(error) =
                 refresh_service_online(&frame, &redis, &cluster, ServiceType::Gate).await
             {
-                xlog::warn!(%error, "Auth Gate online refresh failed");
+                tracing::warn!(%error, "Auth Gate online refresh failed");
             }
         }
     })
@@ -240,7 +243,7 @@ fn spawn_metrics(frame: FrameHandle, api: AuthApi, interval: Duration) -> Option
         loop {
             ticker.tick().await;
             let stats = frame.stats();
-            xlog::info!(
+            tracing::info!(
                 frame_state = ?stats.state,
                 available_request_slots = api.available_request_slots(),
                 rpc_pending = stats.rpc.pending,
@@ -259,7 +262,7 @@ async fn stop_task(task: &mut Option<JoinHandle<()>>, name: &'static str) {
     if let Err(error) = task.await
         && !error.is_cancelled()
     {
-        xlog::error!(task = name, %error, "Auth background task failed");
+        tracing::error!(task = name, %error, "Auth background task failed");
     }
 }
 

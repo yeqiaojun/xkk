@@ -30,6 +30,7 @@ serde_yaml = "0.9.34"
 sha2 = "0.10.9"
 thiserror = "2.0.17"
 tokio = { version = "1.52.3", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tracing = "0.1.44"
 xnet = { path = "../deps-rust/xnet" }
 xproto = { path = "../deps-rust/xproto" }
 xredis = { path = "../deps-rust/xredis" }
@@ -42,7 +43,10 @@ xkk-cache = { path = "cache" }
 xkk-common = { path = "common" }
 xkk-config = { path = "config" }
 xkk-persist = { path = "persist" }
-prost = "0.14.3"
+prost = "0.14.4"
+prost-build = "0.14.4"
+prost-types = "0.14.4"
+prost-reflect = { version = "0.16.5", features = ["serde"] }
 
 [profile.release]
 lto = "thin"

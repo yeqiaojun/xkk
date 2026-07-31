@@ -30,8 +30,6 @@ runtime:
 
 log:
   level: info
-  targets:
-    xnet: debug
   stdout: true
   file: logs/public.log
   async_queue_capacity: 8192

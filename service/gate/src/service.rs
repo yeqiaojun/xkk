@@ -173,8 +173,8 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
     let log_guard = xlog::init_global(log_options)?;
 
     let service: Result<(), ServiceError> = async {
+        xkk_protocol::init_global_registry()?;
         let mut prepared = xframe::prepare(frame_config).await?;
-        prepared.register_client_protocol(xkk_protocol::client_registry()?);
         let handle = prepared.handle();
         let redis = handle
             .redis()
@@ -202,9 +202,9 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
                 gateway,
             ))
             .await?;
-        xlog::info!(instance_id, "Gate service started");
+        tracing::info!(instance_id, "Gate service started");
         let shutdown = frame.run_until_shutdown_signal().await;
-        xlog::info!(
+        tracing::info!(
             instance_id,
             success = shutdown.is_ok(),
             "Gate service stopped"
@@ -293,7 +293,7 @@ impl Application for GateApplication {
         )
         .await
         {
-            xlog::warn!(%error, "Gate service online cleanup failed");
+            tracing::warn!(%error, "Gate service online cleanup failed");
         }
         self.gateway.shutdown().await;
         Ok(())
@@ -343,12 +343,12 @@ fn spawn_service_loads(
             )
             .await
             {
-                xlog::warn!(online_count, %error, "Gate service online publish failed");
+                tracing::warn!(online_count, %error, "Gate service online publish failed");
             }
             if let Err(error) =
                 refresh_service_online(&frame, &redis, &cluster, ServiceType::Logic).await
             {
-                xlog::warn!(%error, "Gate Logic online refresh failed");
+                tracing::warn!(%error, "Gate Logic online refresh failed");
             }
         }
     })
@@ -362,7 +362,7 @@ async fn stop_task(task: &mut Option<JoinHandle<()>>, name: &'static str) {
     if let Err(error) = task.await
         && !error.is_cancelled()
     {
-        xlog::error!(task = name, %error, "Gate background task failed");
+        tracing::error!(task = name, %error, "Gate background task failed");
     }
 }
 
@@ -382,8 +382,9 @@ fn spawn_metrics(
             let expired = gateway.sessions().prune_expired(Instant::now());
             let sessions = gateway.sessions().stats();
             let online_count = gateway.online_count();
+            let login = gateway.login_stats();
             let stats = frame.stats();
-            xlog::info!(
+            tracing::info!(
                 frame_state = ?stats.state,
                 active_sessions = stats.sessions.active_sessions,
                 online_players = online_count,
@@ -394,6 +395,20 @@ fn spawn_metrics(
                 rpc_pending = stats.rpc.pending,
                 rpc_inbound_active = stats.rpc.inbound_active,
                 rpc_pending_rejected = stats.rpc.pending_rejected,
+                login_count = login.total.count(),
+                login_avg_us = login.total.average_micros(),
+                login_p99_us = login.total.percentile_micros(99.0),
+                login_max_us = login.total.max_micros,
+                login_token_avg_us = login.token_decode.average_micros(),
+                login_redis_load_avg_us = login.redis_load_online.average_micros(),
+                login_redis_load_p99_us = login.redis_load_online.percentile_micros(99.0),
+                login_route_avg_us = login.route_select.average_micros(),
+                login_logic_rpc_avg_us = login.logic_rpc.average_micros(),
+                login_logic_rpc_p99_us = login.logic_rpc.percentile_micros(99.0),
+                login_bind_avg_us = login.session_bind.average_micros(),
+                login_redis_save_avg_us = login.redis_save_online.average_micros(),
+                login_redis_save_p99_us = login.redis_save_online.percentile_micros(99.0),
+                login_send_avg_us = login.response_send.average_micros(),
                 listeners = ?stats.listeners,
                 "Gate runtime stats"
             );

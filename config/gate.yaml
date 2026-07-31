@@ -48,8 +48,6 @@ security:
 
 log:
   level: info
-  targets:
-    xnet: debug
   stdout: true
   file: logs/gate.log
   async_queue_capacity: 8192

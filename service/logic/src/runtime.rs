@@ -631,7 +631,10 @@ where
                 let player_id = load_player_id.fetch_add(1, Ordering::Relaxed);
                 async move {
                     stats.load_calls.fetch_add(1, Ordering::Relaxed);
-                    match (persistence.loader)(gid).await {
+                    let started = Instant::now();
+                    let result = (persistence.loader)(gid).await;
+                    stats.load_latency.record(started.elapsed());
+                    match result {
                         Ok(state) => Ok(Arc::new(PlayerCell::new(player_id, state, &stats))),
                         Err(error) => {
                             stats.load_failed.fetch_add(1, Ordering::Relaxed);
@@ -1152,6 +1155,7 @@ where
             rejected_dirty: self.stats.rejected_dirty.load(Ordering::Relaxed),
             rejected_draining: self.stats.rejected_draining.load(Ordering::Relaxed),
             queue_latency: self.stats.queue_latency.snapshot(),
+            load_latency: self.stats.load_latency.snapshot(),
             run_latency: self.stats.run_latency.snapshot(),
             preload_latency: self.stats.preload_latency.snapshot(),
             save_latency: self.stats.save_latency.snapshot(),

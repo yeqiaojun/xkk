@@ -33,8 +33,6 @@ runtime:
 
 log:
   level: info
-  targets:
-    xnet: debug
   stdout: true
   file: logs/query.log
   async_queue_capacity: 8192

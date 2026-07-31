@@ -52,10 +52,13 @@ registrations and the three expected Hello-validated service-link edges, then ru
 the cluster running. Use `-Action Status` to inspect it and `-Action Stop` to require graceful drain
 and immediate etcd deregistration. Runtime logs, smoke identity, and PIDs are kept under `.run/`.
 
-Protocol generation is deliberately pinned to `C:\work\deps-rust\tools\protoc.exe` and
-`C:\work\deps-rust\tools\protoc-gen-xmongo-trait.exe`; normal Cargo builds fail when either tool
-is missing. `proto/xkk.proto` contains wire messages and the shared `MsgId` enum;
-`proto/model.proto` contains persistence models only.
+Protocol generation is deliberately pinned to the checked-in `tools/protoc.exe` and
+`tools/protoc-gen-xmongo-trait.exe`; normal Cargo builds fail when either tool is missing.
+`tools/protoc-gen-go-grpc.exe` is also retained locally for future Go gRPC generation.
+`proto/xkk.proto` contains wire messages and the shared `MsgId` enum;
+`proto/model.proto` contains persistence models only. Run `bash scripts/gen-proto.sh` after changing
+either proto or the xmongo generator. The script refreshes the reviewable Rust sources under
+`protocol/generated/`, and normal Cargo builds fail when those checked-in files are stale.
 
 The checked-in YAML files are explicit capacity contracts and local examples. Replace their DSNs,
 advertised hosts, and ports for each environment.

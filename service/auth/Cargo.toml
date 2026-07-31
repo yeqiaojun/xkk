@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 xframe.workspace = true
 xkk-cache.workspace = true
 xkk-common.workspace = true

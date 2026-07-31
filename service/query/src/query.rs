@@ -69,7 +69,7 @@ impl QueryApi {
         let mut cursor = match self.players.find(doc! { "_id": { "$in": ids } }).await {
             Ok(cursor) => cursor,
             Err(error) => {
-                xlog::error!(?gamer_ids, %error, "Query player batch load failed");
+                tracing::error!(?gamer_ids, %error, "Query player batch load failed");
                 return gamer_info_error(code::INTERNAL, "player load failed");
             }
         };
@@ -79,21 +79,21 @@ impl QueryApi {
                 Ok(true) => {}
                 Ok(false) => break,
                 Err(error) => {
-                    xlog::error!(?gamer_ids, %error, "Query player cursor failed");
+                    tracing::error!(?gamer_ids, %error, "Query player cursor failed");
                     return gamer_info_error(code::INTERNAL, "player load failed");
                 }
             }
             let document = match cursor.deserialize_current() {
                 Ok(document) => document,
                 Err(error) => {
-                    xlog::error!(?gamer_ids, %error, "Query player document decode failed");
+                    tracing::error!(?gamer_ids, %error, "Query player document decode failed");
                     return gamer_info_error(code::INTERNAL, "player decode failed");
                 }
             };
             let player = match pb::PlayerData::from_bson_value(&Bson::Document(document)) {
                 Ok(player) => player,
                 Err(error) => {
-                    xlog::error!(?gamer_ids, %error, "Query player BSON decode failed");
+                    tracing::error!(?gamer_ids, %error, "Query player BSON decode failed");
                     return gamer_info_error(code::INTERNAL, "player decode failed");
                 }
             };
@@ -150,7 +150,7 @@ impl QueryApi {
             Ok(Some(manifest)) => Ok(manifest),
             Ok(None) => Err(error_status(code::NOT_FOUND, "config manifest not found")),
             Err(error) => {
-                xlog::error!(version = %self.manifest.version, %error, "Query manifest load failed");
+                tracing::error!(version = %self.manifest.version, %error, "Query manifest load failed");
                 Err(error_status(code::INTERNAL, "config manifest load failed"))
             }
         }

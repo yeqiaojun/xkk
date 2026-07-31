@@ -17,7 +17,7 @@ use xframe::{
 };
 use xkk_cache::{delete_service_online, publish_service_online, service_online_ttl};
 
-use crate::{LogicConfig, LogicRuntime, player};
+use crate::{LogicConfig, LogicRuntime, player, stats::LoginMetrics};
 pub use xkk_config::LogicConfig as Config;
 
 #[derive(Debug, Error)]
@@ -36,6 +36,8 @@ pub enum ServiceError {
     Redis(#[from] xframe::xredis::Error),
     #[error(transparent)]
     Rpc(#[from] xframe::xrpc::Error),
+    #[error(transparent)]
+    Protocol(#[from] xkk_protocol::ProtocolError),
 }
 
 fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
@@ -109,6 +111,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
     let log_guard = xlog::init_global(log_options)?;
 
     let service: Result<(), ServiceError> = async {
+        xkk_protocol::init_global_registry()?;
         let prepared = xframe::prepare(frame_config).await?;
         let handle = prepared.handle();
         let mongo = handle
@@ -118,9 +121,15 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
             .redis()
             .expect("Logic FrameConfig always enables Redis");
         let application_redis = redis.clone();
+        let login_metrics = Arc::new(LoginMetrics::default());
         let runtime = LogicRuntime::new(
             logic_config,
-            player::persistence(mongo, mongo_database, player_collection),
+            player::persistence(
+                mongo,
+                mongo_database,
+                player_collection,
+                login_metrics.clone(),
+            ),
         );
         let online_count = Arc::new(AtomicI32::new(0));
         player::register_handlers(
@@ -131,6 +140,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
             instance_id,
             online_count.clone(),
             rpc_timeout,
+            login_metrics.clone(),
         )?;
         let frame = prepared
             .start(LogicApplication {
@@ -143,13 +153,14 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
                 logic_config,
                 runtime,
                 online_count,
+                login_metrics,
                 service_load_task: None,
                 metrics_task: None,
             })
             .await?;
-        xlog::info!(instance_id, "Logic service started");
+        tracing::info!(instance_id, "Logic service started");
         let shutdown = frame.run_until_shutdown_signal().await;
-        xlog::info!(
+        tracing::info!(
             instance_id,
             success = shutdown.is_ok(),
             "Logic service stopped"
@@ -174,6 +185,7 @@ struct LogicApplication {
     logic_config: LogicConfig,
     runtime: LogicRuntime<player::PlayerState, player::PlayerError>,
     online_count: Arc<AtomicI32>,
+    login_metrics: Arc<LoginMetrics>,
     service_load_task: Option<JoinHandle<()>>,
     metrics_task: Option<JoinHandle<()>>,
 }
@@ -201,7 +213,7 @@ impl Application for LogicApplication {
             self.online_count.clone(),
             self.service_load_interval,
         ));
-        xlog::info!(
+        tracing::info!(
             resident_players = self.logic_config.resident_capacity,
             max_dirty_players = self.logic_config.max_dirty_players,
             max_inflight_calls = self.logic_config.max_inflight_calls,
@@ -212,6 +224,7 @@ impl Application for LogicApplication {
             frame,
             self.runtime.clone(),
             self.online_count.clone(),
+            self.login_metrics.clone(),
             self.metrics_interval,
         );
         Ok(())
@@ -227,7 +240,7 @@ impl Application for LogicApplication {
         )
         .await
         {
-            xlog::warn!(%error, "Logic service online cleanup failed");
+            tracing::warn!(%error, "Logic service online cleanup failed");
         }
         stop_task(&mut self.metrics_task, "Logic metrics").await;
         self.runtime
@@ -236,7 +249,7 @@ impl Application for LogicApplication {
             .map_err(|error| Box::new(error) as xframe::ApplicationError)?;
         let logic = self.runtime.stats();
         let rpc = frame.stats().rpc;
-        xlog::info!(
+        tracing::info!(
             logic_inflight = logic.inflight_calls,
             logic_queued = logic.queued,
             logic_active_gids = logic.active_gids,
@@ -273,7 +286,7 @@ fn spawn_service_online(
             )
             .await
             {
-                xlog::warn!(online_count, %error, "Logic service online publish failed");
+                tracing::warn!(online_count, %error, "Logic service online publish failed");
             }
         }
     })
@@ -287,7 +300,7 @@ async fn stop_task(task: &mut Option<JoinHandle<()>>, name: &'static str) {
     if let Err(error) = task.await
         && !error.is_cancelled()
     {
-        xlog::error!(task = name, %error, "Logic background task failed");
+        tracing::error!(task = name, %error, "Logic background task failed");
     }
 }
 
@@ -295,6 +308,7 @@ fn spawn_metrics(
     frame: FrameHandle,
     runtime: LogicRuntime<player::PlayerState, player::PlayerError>,
     online_count: Arc<AtomicI32>,
+    login_metrics: Arc<LoginMetrics>,
     interval: Duration,
 ) -> Option<JoinHandle<()>> {
     if interval.is_zero() {
@@ -308,7 +322,8 @@ fn spawn_metrics(
             let online = online_count.load(Ordering::Acquire);
             let frame_stats = frame.stats();
             let logic_stats = runtime.stats();
-            xlog::info!(
+            let login = login_metrics.snapshot();
+            tracing::info!(
                 online_players = online,
                 frame_state = ?frame_stats.state,
                 active_sessions = frame_stats.sessions.active_sessions,
@@ -326,8 +341,24 @@ fn spawn_metrics(
                     + logic_stats.rejected_gid
                     + logic_stats.rejected_dirty
                     + logic_stats.rejected_draining,
+                logic_queue_p99_us = logic_stats.queue_latency.percentile_micros(99.0),
+                logic_load_p99_us = logic_stats.load_latency.percentile_micros(99.0),
+                logic_preload_p99_us = logic_stats.preload_latency.percentile_micros(99.0),
+                logic_run_p99_us = logic_stats.run_latency.percentile_micros(99.0),
                 logic_p99_us = logic_stats.total_latency.percentile_micros(99.0),
                 logic_p999_us = logic_stats.total_latency.percentile_micros(99.9),
+                login_count = login.total.count(),
+                login_avg_us = login.total.average_micros(),
+                login_p99_us = login.total.percentile_micros(99.0),
+                login_max_us = login.total.max_micros,
+                login_runtime_avg_us = login.runtime_wait.average_micros(),
+                login_runtime_p99_us = login.runtime_wait.percentile_micros(99.0),
+                login_mongo_find_avg_us = login.mongo_find.average_micros(),
+                login_mongo_find_p99_us = login.mongo_find.percentile_micros(99.0),
+                login_mongo_create_avg_us = login.mongo_create.average_micros(),
+                login_mongo_create_p99_us = login.mongo_create.percentile_micros(99.0),
+                login_redis_owner_avg_us = login.redis_owner.average_micros(),
+                login_redis_owner_p99_us = login.redis_owner.percentile_micros(99.0),
                 save_failed = logic_stats.save_failed,
                 flush_p99_us = logic_stats.flush_latency.percentile_micros(99.0),
                 listeners = ?frame_stats.listeners,

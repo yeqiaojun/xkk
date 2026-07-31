@@ -8,7 +8,7 @@ use xframe::{
 use xkk_cache::load_online;
 use xkk_common::unix_seconds;
 use xkk_persist::{load_model, save_model};
-use xkk_protocol::{MsgId, code, error_status, ok_status, pb};
+use xkk_protocol::{code, error_status, ok_status, pb};
 
 const MAIL_READ: i32 = 1;
 const MAIL_CLAIMED: i32 = 2;
@@ -60,54 +60,34 @@ impl MailService {
 
     pub fn register_handlers(&self, rpc: &RpcManager) -> xframe::xrpc::Result<()> {
         let list = self.clone();
-        rpc.register_pair::<pb::MailListReq, pb::MailListRsp, _, _>(
-            MsgId::MailListReq.as_u32(),
-            MsgId::MailListRsp.as_u32(),
-            move |context, request| {
-                let service = list.clone();
-                async move { Ok(service.list(context, request).await) }
-            },
-        )?;
+        rpc.register_typed::<pb::MailListReq, _, _>(move |context, request| {
+            let service = list.clone();
+            async move { Ok(service.list(context, request).await) }
+        })?;
 
         let read = self.clone();
-        rpc.register_pair::<pb::MailReadReq, pb::MailReadRsp, _, _>(
-            MsgId::MailReadReq.as_u32(),
-            MsgId::MailReadRsp.as_u32(),
-            move |context, request| {
-                let service = read.clone();
-                async move { Ok(service.read(context, request).await) }
-            },
-        )?;
+        rpc.register_typed::<pb::MailReadReq, _, _>(move |context, request| {
+            let service = read.clone();
+            async move { Ok(service.read(context, request).await) }
+        })?;
 
         let delete = self.clone();
-        rpc.register_pair::<pb::MailDeleteReq, pb::MailDeleteRsp, _, _>(
-            MsgId::MailDeleteReq.as_u32(),
-            MsgId::MailDeleteRsp.as_u32(),
-            move |context, request| {
-                let service = delete.clone();
-                async move { Ok(service.delete(context, request).await) }
-            },
-        )?;
+        rpc.register_typed::<pb::MailDeleteReq, _, _>(move |context, request| {
+            let service = delete.clone();
+            async move { Ok(service.delete(context, request).await) }
+        })?;
 
         let claim = self.clone();
-        rpc.register_pair::<pb::MailClaimReq, pb::MailClaimRsp, _, _>(
-            MsgId::MailClaimReq.as_u32(),
-            MsgId::MailClaimRsp.as_u32(),
-            move |context, request| {
-                let service = claim.clone();
-                async move { Ok(service.claim(context, request).await) }
-            },
-        )?;
+        rpc.register_typed::<pb::MailClaimReq, _, _>(move |context, request| {
+            let service = claim.clone();
+            async move { Ok(service.claim(context, request).await) }
+        })?;
 
         let send = self.clone();
-        rpc.register_pair::<pb::SendMailReq, pb::SendMailRsp, _, _>(
-            MsgId::SendMailReq.as_u32(),
-            MsgId::SendMailRsp.as_u32(),
-            move |_context, request| {
-                let service = send.clone();
-                async move { Ok(service.send_mail(request).await) }
-            },
-        )?;
+        rpc.register_typed::<pb::SendMailReq, _, _>(move |_context, request| {
+            let service = send.clone();
+            async move { Ok(service.send_mail(request).await) }
+        })?;
         Ok(())
     }
 
@@ -248,20 +228,18 @@ impl MailService {
                 );
             }
             Err(error) => {
-                xlog::error!(gid, %error, "Public claim online state load failed");
+                tracing::error!(gid, %error, "Public claim online state load failed");
                 return mail_claim_error(code::INTERNAL, "online state load failed");
             }
         };
         let response: pb::AddItemsRsp = match self
             .frame
-            .call_player_to(
+            .call_player_to_typed(
                 ServiceType::Logic,
                 online.logic_id,
                 gid,
                 i64::try_from(context.head.player_session)
                     .expect("validated player session fits i64"),
-                MsgId::AddItemsReq.as_u32(),
-                MsgId::AddItemsRsp.as_u32(),
                 &pb::AddItemsReq {
                     gid,
                     items: attachments,
@@ -273,7 +251,7 @@ impl MailService {
         {
             Ok(response) => response,
             Err(error) => {
-                xlog::error!(gid, ?mail_ids, %error, "Public claimed mail item RPC failed");
+                tracing::error!(gid, ?mail_ids, %error, "Public claimed mail item RPC failed");
                 return mail_claim_error(code::TEMPORARILY_UNAVAILABLE, "item grant failed");
             }
         };
@@ -281,7 +259,7 @@ impl MailService {
             .status
             .unwrap_or_else(|| error_status(code::INTERNAL, "Logic item response has no status"));
         if status.code != code::OK {
-            xlog::error!(
+            tracing::error!(
                 gid,
                 ?mail_ids,
                 status = status.code,
@@ -398,10 +376,9 @@ impl MailService {
         }
         if let Err(error) = self
             .frame
-            .send_to(
+            .send_to_typed(
                 ServiceType::Gate,
                 online.gate_id,
-                MsgId::MailPushNtf.as_u32(),
                 &pb::MailPushNtf {
                     gid,
                     mail: Some(mail),
@@ -409,7 +386,7 @@ impl MailService {
             )
             .await
         {
-            xlog::debug!(gid, gate_id = online.gate_id, %error, "Public mail push failed");
+            tracing::debug!(gid, gate_id = online.gate_id, %error, "Public mail push failed");
         }
     }
 
@@ -422,7 +399,7 @@ impl MailService {
             Ok(Some(lock)) => Ok(lock),
             Ok(None) => Err(error_status(code::OVERLOADED, "mail request in progress")),
             Err(error) => {
-                xlog::error!(gid, %error, "Public mail lock failed");
+                tracing::error!(gid, %error, "Public mail lock failed");
                 Err(error_status(code::INTERNAL, "mail lock failed"))
             }
         }
@@ -430,7 +407,7 @@ impl MailService {
 
     async fn release(&self, lock: xframe::xredis::RedisLock, gid: i64) {
         if let Err(error) = lock.release().await {
-            xlog::warn!(gid, %error, "Public mail lock release failed");
+            tracing::warn!(gid, %error, "Public mail lock release failed");
         }
     }
 
@@ -443,7 +420,7 @@ impl MailService {
                 mails: Vec::new(),
             }),
             Err(error) => {
-                xlog::error!(gid, %error, "Public mail load failed");
+                tracing::error!(gid, %error, "Public mail load failed");
                 Err(error_status(code::INTERNAL, "mail load failed"))
             }
         }
@@ -451,7 +428,7 @@ impl MailService {
 
     async fn save(&self, data: &pb::GamerMailData) -> Result<(), pb::Status> {
         save_model(&self.collection, data).await.map_err(|error| {
-            xlog::error!(gid = data.gid, %error, "Public mail save failed");
+            tracing::error!(gid = data.gid, %error, "Public mail save failed");
             error_status(code::INTERNAL, "mail save failed")
         })
     }

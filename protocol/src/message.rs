@@ -1,6 +1,6 @@
 use std::ops::RangeInclusive;
 
-use crate::MsgId;
+use crate::{MsgId, registry};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageKind {
@@ -39,7 +39,7 @@ impl MsgId {
     }
 }
 
-pub const OUTBOX_EXCLUDED_RANGES: &[RangeInclusive<u16>] = &[1..=99];
+pub const OUTBOX_EXCLUDED_RANGES: &[RangeInclusive<u16>] = &[1..=99, 3000..=3014];
 
 pub fn is_outbox_message(msgid: u16) -> bool {
     !OUTBOX_EXCLUDED_RANGES
@@ -48,30 +48,11 @@ pub fn is_outbox_message(msgid: u16) -> bool {
 }
 
 pub fn response_for(request: MsgId) -> Option<MsgId> {
-    Some(match request {
-        MsgId::PingReq => MsgId::PingRsp,
-        MsgId::LoginReq => MsgId::LoginRsp,
-        MsgId::ReconnectReq => MsgId::ReconnectRsp,
-        MsgId::LogoutReq => MsgId::LogoutRsp,
-        MsgId::LogicLoginReq => MsgId::LogicLoginRsp,
-        MsgId::KickSessionReq => MsgId::KickSessionRsp,
-        MsgId::PlayerInfoReq => MsgId::PlayerInfoRsp,
-        MsgId::UseItemReq => MsgId::UseItemRsp,
-        MsgId::MailListReq => MsgId::MailListRsp,
-        MsgId::MailReadReq => MsgId::MailReadRsp,
-        MsgId::MailDeleteReq => MsgId::MailDeleteRsp,
-        MsgId::MailClaimReq => MsgId::MailClaimRsp,
-        MsgId::AddItemsReq => MsgId::AddItemsRsp,
-        MsgId::RemoveItemsReq => MsgId::RemoveItemsRsp,
-        MsgId::CheckItemsReq => MsgId::CheckItemsRsp,
-        MsgId::SendMailReq => MsgId::SendMailRsp,
-        MsgId::AuthLoginReq => MsgId::AuthLoginRsp,
-        MsgId::AuthUseRoleReq => MsgId::AuthUseRoleRsp,
-        MsgId::GamerInfoReq => MsgId::GamerInfoRsp,
-        MsgId::ConfigKeyReq => MsgId::ConfigKeyRsp,
-        MsgId::ConfigManifestReq => MsgId::ConfigManifestRsp,
-        _ => return None,
-    })
+    registry::response_id(request)
+}
+
+pub fn request_for(response: MsgId) -> Option<MsgId> {
+    registry::request_id(response)
 }
 
 pub fn route_target(request: MsgId) -> Option<RouteTarget> {

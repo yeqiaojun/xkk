@@ -13,6 +13,7 @@ use xframe::{
     FrameHandle, ServiceType,
     xnet::{Connection, Frame as NetFrame, Handler, SessionId},
     xproto::cs::{CsHead, CsPacket},
+    xproto::{RequestMessage, WireMessage},
     xrpc::{JsonMessage, RpcManager},
     xservice::{NetStatus, ServiceStatus},
 };
@@ -21,7 +22,10 @@ use xkk_common::{unix_millis, unix_seconds};
 use xkk_protocol::{MsgId, RouteTarget, code, error_status, from_u16, ok_status, pb, route_target};
 use xtoken::TokenCoder;
 
-use crate::session::{ClientSessions, RequestError, ResumeError, Routes, SendError, encode_direct};
+use crate::{
+    session::{ClientSessions, RequestError, ResumeError, Routes, SendError, encode_direct},
+    stats::{LoginMetrics, LoginStats},
+};
 
 #[derive(Debug, Clone)]
 pub(crate) struct GatewaySettings {
@@ -75,6 +79,7 @@ impl Gateway {
                 gate_id: settings.gate_id,
                 rpc_timeout: settings.rpc_timeout,
                 online_count,
+                login_metrics: LoginMetrics::default(),
                 draining: AtomicBool::new(false),
                 shutdown_cleanup_concurrency: settings.shutdown_cleanup_concurrency,
             }),
@@ -85,26 +90,19 @@ impl Gateway {
 
     pub fn register_rpc(&self, rpc: &RpcManager) -> xframe::xrpc::Result<()> {
         let kick_state = self.state.clone();
-        rpc.register_pair::<pb::KickSessionReq, pb::KickSessionRsp, _, _>(
-            MsgId::KickSessionReq.as_u32(),
-            MsgId::KickSessionRsp.as_u32(),
-            move |_ctx, request| {
-                let state = kick_state.clone();
-                async move { Ok(state.kick_session(request).await) }
-            },
-        )?;
+        rpc.register_typed::<pb::KickSessionReq, _, _>(move |_ctx, request| {
+            let state = kick_state.clone();
+            async move { Ok(state.kick_session(request).await) }
+        })?;
 
         let mail_state = self.state.clone();
-        rpc.register_send::<pb::MailPushNtf, _, _>(
-            MsgId::MailPushNtf.as_u32(),
-            move |_ctx, request| {
-                let state = mail_state.clone();
-                async move {
-                    state.push_mail(request);
-                    Ok(())
-                }
-            },
-        )?;
+        rpc.register_notification::<pb::MailPushNtf, _, _>(move |_ctx, request| {
+            let state = mail_state.clone();
+            async move {
+                state.push_mail(request);
+                Ok(())
+            }
+        })?;
         Ok(())
     }
 
@@ -114,6 +112,10 @@ impl Gateway {
 
     pub fn online_count(&self) -> i32 {
         self.state.online_count.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn login_stats(&self) -> LoginStats {
+        self.state.login_metrics.snapshot()
     }
 
     pub async fn shutdown(&self) {
@@ -150,7 +152,7 @@ impl Gateway {
         let stats = self.state.sessions.stats();
         let rpc = self.state.rpc.stats();
         let connection_workers = self.workers.lock().expect("Gate worker map poisoned").len();
-        xlog::info!(
+        tracing::info!(
             online_players = self.online_count(),
             retained_players = stats.players,
             outbox_messages = stats.outbox_messages,
@@ -170,10 +172,9 @@ impl GatewayState {
     async fn cleanup_shutdown_session(&self, session: crate::session::ClosingSession) {
         if let Err(error) = self
             .rpc
-            .send_server(
+            .send_server_typed(
                 ServiceType::Logic,
                 session.routes.logic_id,
-                MsgId::LogicDisconnectNtf.as_u32(),
                 &pb::LogicDisconnectNtf {
                     gid: session.gid,
                     gate_id: self.gate_id,
@@ -182,7 +183,7 @@ impl GatewayState {
             )
             .await
         {
-            xlog::debug!(
+            tracing::debug!(
                 gid = session.gid,
                 session_id = session.session_id,
                 %error,
@@ -193,7 +194,7 @@ impl GatewayState {
             clear_gate_by_session(&self.redis, session.gid, session.session_id, unix_seconds())
                 .await
         {
-            xlog::warn!(
+            tracing::warn!(
                 gid = session.gid,
                 session_id = session.session_id,
                 %error,
@@ -232,7 +233,7 @@ impl Handler for Gateway {
             },
         );
         assert!(old.is_none(), "Gate session worker registered twice");
-        xlog::info!(
+        tracing::info!(
             session_id,
             peer_addr = %conn.peer_addr(),
             "Gate client connection established"
@@ -256,7 +257,7 @@ impl Handler for Gateway {
         };
         if let Err(error) = sender.try_send(frame) {
             let frame = error.into_inner();
-            xlog::warn!(
+            tracing::warn!(
                 session_id = frame.session_id,
                 peer_addr = %frame.peer_addr,
                 "Gate client mailbox overloaded"
@@ -299,6 +300,7 @@ struct GatewayState {
     gate_id: i32,
     rpc_timeout: Duration,
     online_count: Arc<AtomicI32>,
+    login_metrics: LoginMetrics,
     draining: AtomicBool,
     shutdown_cleanup_concurrency: usize,
 }
@@ -308,7 +310,7 @@ impl GatewayState {
         let packet = match CsPacket::decode(&frame.payload) {
             Ok(packet) => packet,
             Err(error) => {
-                xlog::warn!(
+                tracing::warn!(
                     session_id = frame.session_id,
                     %error,
                     "Gate rejected invalid client packet"
@@ -318,7 +320,7 @@ impl GatewayState {
             }
         };
         let Some(msgid) = from_u16(packet.head.msgid) else {
-            xlog::warn!(
+            tracing::warn!(
                 session_id = frame.session_id,
                 msgid = packet.head.msgid,
                 "Gate rejected unknown client message"
@@ -442,7 +444,7 @@ impl GatewayState {
                 .await;
             }
             _ => {
-                xlog::warn!(
+                tracing::warn!(
                     session_id = frame.session_id,
                     msgid = msgid.as_u16(),
                     "Gate rejected non-request client message"
@@ -512,6 +514,7 @@ impl GatewayState {
     }
 
     async fn handle_login(&self, frame: &NetFrame, packet: CsPacket<'_>) {
+        let total_started = Instant::now();
         let Some(request) = decode::<pb::LoginReq>(frame, packet.body) else {
             return;
         };
@@ -540,6 +543,7 @@ impl GatewayState {
             );
             return;
         };
+        let route_started = Instant::now();
         let logic_id = match self.select_logic(&online) {
             Some(logic_id) => logic_id,
             None => {
@@ -554,7 +558,7 @@ impl GatewayState {
         let public_id = match self.frame.pick_by_hash(ServiceType::Public, request.gid) {
             Ok(instance) => instance.instance_id,
             Err(error) => {
-                xlog::warn!(gid = request.gid, %error, "Gate Public selection failed");
+                tracing::warn!(gid = request.gid, %error, "Gate Public selection failed");
                 self.reject_login(
                     &frame.conn,
                     packet.head.seq,
@@ -563,6 +567,9 @@ impl GatewayState {
                 return;
             }
         };
+        self.login_metrics
+            .route_select
+            .record(route_started.elapsed());
 
         let logic_request = pb::LogicLoginReq {
             gid: request.gid,
@@ -571,23 +578,23 @@ impl GatewayState {
             device_id: request.device_id.clone(),
             reconnect: false,
         };
-        let logic_response: pb::LogicLoginRsp = match self
+        let rpc_started = Instant::now();
+        let logic_response = self
             .frame
-            .call_player_to(
+            .call_player_to_typed(
                 ServiceType::Logic,
                 logic_id,
                 request.gid,
                 frame.session_id,
-                MsgId::LogicLoginReq.as_u32(),
-                MsgId::LogicLoginRsp.as_u32(),
                 &logic_request,
                 self.rpc_timeout,
             )
-            .await
-        {
+            .await;
+        self.login_metrics.logic_rpc.record(rpc_started.elapsed());
+        let logic_response: pb::LogicLoginRsp = match logic_response {
             Ok(response) => response,
             Err(error) => {
-                xlog::warn!(gid = request.gid, logic_id, %error, "Gate Logic login RPC failed");
+                tracing::warn!(gid = request.gid, logic_id, %error, "Gate Logic login RPC failed");
                 self.reject_login(
                     &frame.conn,
                     packet.head.seq,
@@ -605,6 +612,7 @@ impl GatewayState {
             return;
         }
 
+        let bind_started = Instant::now();
         let routes = Routes {
             logic_id,
             public_id,
@@ -623,6 +631,9 @@ impl GatewayState {
         if became_active {
             self.online_count.fetch_add(1, Ordering::AcqRel);
         }
+        self.login_metrics
+            .session_bind
+            .record(bind_started.elapsed());
 
         online.session = frame.session_id;
         online.login_time = unix_seconds();
@@ -630,8 +641,13 @@ impl GatewayState {
         online.public_id = public_id;
         online.gate_id = self.gate_id;
         online.logic_id = logic_id;
-        if let Err(error) = save_online(&self.redis, &online).await {
-            xlog::error!(gid = request.gid, %error, "Gate online save failed after login");
+        let save_started = Instant::now();
+        let save_result = save_online(&self.redis, &online).await;
+        self.login_metrics
+            .redis_save_online
+            .record(save_started.elapsed());
+        if let Err(error) = save_result {
+            tracing::error!(gid = request.gid, %error, "Gate online save failed after login");
             self.kick_local(
                 request.gid,
                 frame.session_id,
@@ -642,6 +658,7 @@ impl GatewayState {
             return;
         }
 
+        let send_started = Instant::now();
         let response = pb::LoginRsp {
             status: Some(ok_status()),
             gid: request.gid,
@@ -652,6 +669,10 @@ impl GatewayState {
             session_id: frame.session_id,
         };
         self.send_bound(request.gid, frame.session_id, MsgId::LoginRsp, &response);
+        self.login_metrics
+            .response_send
+            .record(send_started.elapsed());
+        self.login_metrics.total.record(total_started.elapsed());
     }
 
     async fn handle_reconnect(&self, frame: &NetFrame, packet: CsPacket<'_>) {
@@ -721,13 +742,11 @@ impl GatewayState {
         };
         let logic_response: pb::LogicLoginRsp = match self
             .frame
-            .call_player_to(
+            .call_player_to_typed(
                 ServiceType::Logic,
                 routes.logic_id,
                 request.gid,
                 frame.session_id,
-                MsgId::LogicLoginReq.as_u32(),
-                MsgId::LogicLoginRsp.as_u32(),
                 &logic_request,
                 self.rpc_timeout,
             )
@@ -735,7 +754,7 @@ impl GatewayState {
         {
             Ok(response) => response,
             Err(error) => {
-                xlog::warn!(gid = request.gid, %error, "Gate Logic reconnect RPC failed");
+                tracing::warn!(gid = request.gid, %error, "Gate Logic reconnect RPC failed");
                 self.reject_reconnect(
                     &frame.conn,
                     packet.head.seq,
@@ -784,7 +803,7 @@ impl GatewayState {
         online.public_id = routes.public_id;
         online.gate_id = self.gate_id;
         if let Err(error) = save_online(&self.redis, &online).await {
-            xlog::error!(gid = request.gid, %error, "Gate online save failed after reconnect");
+            tracing::error!(gid = request.gid, %error, "Gate online save failed after reconnect");
             self.kick_local(
                 request.gid,
                 frame.session_id,
@@ -865,10 +884,9 @@ impl GatewayState {
         self.decrement_online();
         let _ = self
             .frame
-            .send_to(
+            .send_to_typed(
                 ServiceType::Logic,
                 routes.logic_id,
-                MsgId::LogicDisconnectNtf.as_u32(),
                 &pb::LogicDisconnectNtf {
                     gid,
                     gate_id: self.gate_id,
@@ -881,7 +899,7 @@ impl GatewayState {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn forward<Req, Rsp, F>(
+    async fn forward<Req, F>(
         &self,
         frame: &NetFrame,
         head: CsHead,
@@ -891,10 +909,12 @@ impl GatewayState {
         request: Req,
         make_error: F,
     ) where
-        Req: JsonMessage + Send + Sync,
-        Rsp: JsonMessage + Send,
-        F: FnOnce(pb::Status) -> Rsp,
+        Req: RequestMessage + Send + Sync,
+        Req::Response: JsonMessage + Send,
+        F: FnOnce(pb::Status) -> Req::Response,
     {
+        debug_assert_eq!(request_msgid.as_u16(), Req::ID);
+        debug_assert_eq!(response_msgid.as_u16(), Req::Response::ID);
         let Some(gid) = frame.conn.user_id() else {
             frame.conn.close();
             return;
@@ -930,15 +950,13 @@ impl GatewayState {
         };
         debug_assert_eq!(route_target(request_msgid), Some(target));
 
-        let response: Rsp = match self
+        let response: Req::Response = match self
             .frame
-            .call_player_to(
+            .call_player_to_typed(
                 service_type,
                 server_id,
                 gid,
                 frame.session_id,
-                request_msgid.as_u32(),
-                response_msgid.as_u32(),
                 &request,
                 self.rpc_timeout,
             )
@@ -946,7 +964,7 @@ impl GatewayState {
         {
             Ok(response) => response,
             Err(error) => {
-                xlog::warn!(
+                tracing::warn!(
                     gid,
                     session_id = frame.session_id,
                     server_id,
@@ -964,14 +982,24 @@ impl GatewayState {
     }
 
     async fn verify_online(&self, gid: i64, token: &str, device_id: &str) -> Option<OnlineData> {
-        if self.token.simple_token_decode(token, device_id).ok()? != gid {
+        let token_started = Instant::now();
+        let decoded_gid = self.token.simple_token_decode(token, device_id).ok();
+        self.login_metrics
+            .token_decode
+            .record(token_started.elapsed());
+        if decoded_gid? != gid {
             return None;
         }
-        let online = match load_online(&self.redis, gid).await {
+        let redis_started = Instant::now();
+        let online = load_online(&self.redis, gid).await;
+        self.login_metrics
+            .redis_load_online
+            .record(redis_started.elapsed());
+        let online = match online {
             Ok(Some(online)) => online,
             Ok(None) => return None,
             Err(error) => {
-                xlog::warn!(gid, %error, "Gate Redis online load failed");
+                tracing::warn!(gid, %error, "Gate Redis online load failed");
                 return None;
             }
         };
@@ -982,7 +1010,7 @@ impl GatewayState {
         if online.logic_id == 0 {
             return self
                 .frame
-                .pick_min_online(ServiceType::Logic)
+                .pick_min_online_and_increment(ServiceType::Logic)
                 .ok()
                 .map(|instance| instance.instance_id);
         }
@@ -999,7 +1027,7 @@ impl GatewayState {
     async fn disconnect(&self, conn: Connection) {
         let session_id = conn.session_id();
         let Some(gid) = conn.user_id() else {
-            xlog::info!(session_id, peer_addr = %conn.peer_addr(), "Gate client connection closed");
+            tracing::info!(session_id, peer_addr = %conn.peer_addr(), "Gate client connection closed");
             return;
         };
         let Some(routes) = self.sessions.disconnect(gid, session_id, Instant::now()) else {
@@ -1008,10 +1036,9 @@ impl GatewayState {
         self.decrement_online();
         if let Err(error) = self
             .frame
-            .send_to(
+            .send_to_typed(
                 ServiceType::Logic,
                 routes.logic_id,
-                MsgId::LogicDisconnectNtf.as_u32(),
                 &pb::LogicDisconnectNtf {
                     gid,
                     gate_id: self.gate_id,
@@ -1020,14 +1047,14 @@ impl GatewayState {
             )
             .await
         {
-            xlog::debug!(gid, session_id, %error, "Gate Logic disconnect notification failed");
+            tracing::debug!(gid, session_id, %error, "Gate Logic disconnect notification failed");
         }
         if let Err(error) =
             clear_gate_by_session(&self.redis, gid, session_id, unix_seconds()).await
         {
-            xlog::warn!(gid, session_id, %error, "Gate Redis disconnect cleanup failed");
+            tracing::warn!(gid, session_id, %error, "Gate Redis disconnect cleanup failed");
         }
-        xlog::info!(gid, session_id, peer_addr = %conn.peer_addr(), "Gate client connection closed");
+        tracing::info!(gid, session_id, peer_addr = %conn.peer_addr(), "Gate client connection closed");
     }
 
     async fn kick_session(&self, request: pb::KickSessionReq) -> pb::KickSessionRsp {
@@ -1119,7 +1146,7 @@ impl GatewayState {
                 let _ = conn.send_shared_flush(payload);
             }
             Err(error) => {
-                xlog::error!(%error, msgid = msgid.as_u16(), "Gate response encode failed");
+                tracing::error!(%error, msgid = msgid.as_u16(), "Gate response encode failed");
             }
         }
         if close {
@@ -1135,7 +1162,7 @@ impl GatewayState {
             match error {
                 SendError::SessionMismatch => {}
                 SendError::QueueFull => {
-                    xlog::warn!(
+                    tracing::warn!(
                         gid,
                         session_id,
                         msgid = msgid.as_u16(),
@@ -1143,7 +1170,7 @@ impl GatewayState {
                     );
                 }
                 SendError::Protocol(error) => {
-                    xlog::error!(gid, session_id, msgid = msgid.as_u16(), %error, "Gate response encode failed");
+                    tracing::error!(gid, session_id, msgid = msgid.as_u16(), %error, "Gate response encode failed");
                 }
             }
         }
@@ -1165,7 +1192,7 @@ where
     match M::decode(body) {
         Ok(message) => Some(message),
         Err(error) => {
-            xlog::warn!(
+            tracing::warn!(
                 session_id = frame.session_id,
                 %error,
                 "Gate protobuf decode failed"

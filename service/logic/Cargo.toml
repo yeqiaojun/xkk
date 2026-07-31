@@ -4,10 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-prost = "0.14.3"
+prost.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 xkk-cache.workspace = true
+xkk-common.workspace = true
 xkk-config.workspace = true
 xkk-persist.workspace = true
 xkk-protocol.workspace = true

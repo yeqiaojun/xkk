@@ -2,8 +2,9 @@ use std::collections::{HashMap, hash_map::Entry};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
+use xkk_common::{LatencyRecorder, LatencyStats};
 
-pub const LATENCY_BUCKETS_US: [u64; 12] = [
+pub const LATENCY_BUCKETS_US: [u64; 18] = [
     10,
     25,
     50,
@@ -14,7 +15,13 @@ pub const LATENCY_BUCKETS_US: [u64; 12] = [
     2_500,
     5_000,
     10_000,
+    15_000,
+    20_000,
+    30_000,
+    50_000,
+    75_000,
     100_000,
+    250_000,
     u64::MAX,
 ];
 
@@ -95,6 +102,7 @@ pub(crate) struct StatsInner {
     pub(crate) rejected_dirty: AtomicU64,
     pub(crate) rejected_draining: AtomicU64,
     pub(crate) queue_latency: AtomicHistogram,
+    pub(crate) load_latency: AtomicHistogram,
     pub(crate) run_latency: AtomicHistogram,
     pub(crate) preload_latency: AtomicHistogram,
     pub(crate) save_latency: AtomicHistogram,
@@ -128,6 +136,7 @@ impl StatsInner {
             rejected_dirty: AtomicU64::new(0),
             rejected_draining: AtomicU64::new(0),
             queue_latency: AtomicHistogram::new(),
+            load_latency: AtomicHistogram::new(),
             run_latency: AtomicHistogram::new(),
             preload_latency: AtomicHistogram::new(),
             save_latency: AtomicHistogram::new(),
@@ -191,6 +200,7 @@ pub struct LogicStats {
     pub rejected_dirty: u64,
     pub rejected_draining: u64,
     pub queue_latency: LatencyHistogram,
+    pub load_latency: LatencyHistogram,
     pub run_latency: LatencyHistogram,
     pub preload_latency: LatencyHistogram,
     pub save_latency: LatencyHistogram,
@@ -203,4 +213,34 @@ pub struct LogicStats {
 #[inline]
 pub(crate) fn update_high_water(high_water: &AtomicU64, value: u64) {
     high_water.fetch_max(value, Ordering::Relaxed);
+}
+
+#[derive(Default)]
+pub(crate) struct LoginMetrics {
+    pub(crate) mongo_find: LatencyRecorder,
+    pub(crate) mongo_create: LatencyRecorder,
+    pub(crate) runtime_wait: LatencyRecorder,
+    pub(crate) redis_owner: LatencyRecorder,
+    pub(crate) total: LatencyRecorder,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct LoginStats {
+    pub(crate) mongo_find: LatencyStats,
+    pub(crate) mongo_create: LatencyStats,
+    pub(crate) runtime_wait: LatencyStats,
+    pub(crate) redis_owner: LatencyStats,
+    pub(crate) total: LatencyStats,
+}
+
+impl LoginMetrics {
+    pub(crate) fn snapshot(&self) -> LoginStats {
+        LoginStats {
+            mongo_find: self.mongo_find.snapshot(),
+            mongo_create: self.mongo_create.snapshot(),
+            runtime_wait: self.runtime_wait.snapshot(),
+            redis_owner: self.redis_owner.snapshot(),
+            total: self.total.snapshot(),
+        }
+    }
 }

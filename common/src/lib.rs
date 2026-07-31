@@ -1,3 +1,7 @@
+mod latency;
+
+pub use latency::{LatencyRecorder, LatencyStats};
+
 use sha2::{Digest, Sha256};
 
 pub fn unix_seconds() -> i64 {
