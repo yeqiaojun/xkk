@@ -1,13 +1,7 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 use tokio::sync::Semaphore;
-use xframe::xmongo::{
-    BsonPathGetter, Collection,
-    mongodb::bson::{Bson, Document, doc},
-};
+use xkk_persist::PlayerStore;
 use xkk_protocol::{code, error_status, ok_status, pb};
 
 // Query fan-out and concurrency are stable protection limits. They are kept in
@@ -17,12 +11,12 @@ const MAX_INFLIGHT_REQUESTS: usize = 1_024;
 
 #[derive(Clone)]
 pub(crate) struct QueryApi {
-    players: Collection<Document>,
+    players: PlayerStore,
     inflight: Arc<Semaphore>,
 }
 
 impl QueryApi {
-    pub fn new(players: Collection<Document>) -> Self {
+    pub fn new(players: PlayerStore) -> Self {
         Self {
             players,
             inflight: Arc::new(Semaphore::new(MAX_INFLIGHT_REQUESTS)),
@@ -51,46 +45,13 @@ impl QueryApi {
         let Some(gamer_ids) = valid_gamer_ids(request.gamer_ids) else {
             return gamer_info_error(code::INVALID_ARGUMENT, "invalid gamer ids");
         };
-        let ids = Bson::Array(gamer_ids.iter().copied().map(Bson::Int64).collect());
-        let mut cursor = match self.players.find(doc! { "_id": { "$in": ids } }).await {
-            Ok(cursor) => cursor,
+        let players = match self.players.load_profiles(&gamer_ids).await {
+            Ok(players) => players,
             Err(error) => {
                 tracing::error!(?gamer_ids, %error, "Query player batch load failed");
                 return gamer_info_error(code::INTERNAL, "player load failed");
             }
         };
-        let mut loaded = HashMap::with_capacity(gamer_ids.len());
-        loop {
-            match cursor.advance().await {
-                Ok(true) => {}
-                Ok(false) => break,
-                Err(error) => {
-                    tracing::error!(?gamer_ids, %error, "Query player cursor failed");
-                    return gamer_info_error(code::INTERNAL, "player load failed");
-                }
-            }
-            let document = match cursor.deserialize_current() {
-                Ok(document) => document,
-                Err(error) => {
-                    tracing::error!(?gamer_ids, %error, "Query player document decode failed");
-                    return gamer_info_error(code::INTERNAL, "player decode failed");
-                }
-            };
-            let player = match pb::PlayerData::from_bson_value(&Bson::Document(document)) {
-                Ok(player) => player,
-                Err(error) => {
-                    tracing::error!(?gamer_ids, %error, "Query player BSON decode failed");
-                    return gamer_info_error(code::INTERNAL, "player decode failed");
-                }
-            };
-            if let Some(profile) = player.profile {
-                loaded.insert(player.gid, profile);
-            }
-        }
-        let players = gamer_ids
-            .into_iter()
-            .filter_map(|gid| loaded.remove(&gid))
-            .collect();
         pb::GamerInfoRsp {
             status: Some(ok_status()),
             players,

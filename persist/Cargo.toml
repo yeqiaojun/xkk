@@ -4,9 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+dashmap.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 xframe.workspace = true
 xlru.workspace = true
+xkk-common.workspace = true
 xkk-protocol.workspace = true
 
 [dev-dependencies]

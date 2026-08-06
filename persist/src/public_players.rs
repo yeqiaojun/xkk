@@ -7,11 +7,11 @@ use std::{
 };
 
 use dashmap::DashSet;
-use xframe::xmongo::{self, Collection, mongodb::bson::Document};
 use xkk_common::{LatencyRecorder, LatencyStats};
-use xkk_persist::{PublicPlayer, load_model, save_model, save_models};
 use xkk_protocol::pb;
 use xlru::{Options, XlruCache};
+
+use crate::{Error, PublicPlayerStore, public_player::PublicPlayer};
 
 // One Public process retains a large, long-lived working set. The deployment
 // must size Public ownership so active players do not reach this eviction edge.
@@ -20,15 +20,15 @@ const PLAYER_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const PLAYER_CACHE_SHARDS: usize = 128;
 const PLAYER_SAVE_BATCH_SIZE: usize = 1_000;
 
-type Cache = XlruCache<i64, Arc<PublicPlayer>, xmongo::Error>;
-pub(crate) type CacheError = xlru::Error<xmongo::Error>;
+type Cache = XlruCache<i64, Arc<PublicPlayer>, Error>;
+pub type PublicPlayerCacheError = xlru::Error<Error>;
 
 #[derive(Clone)]
-pub(crate) struct Players {
-    inner: Arc<PlayersInner>,
+pub struct PublicPlayers {
+    inner: Arc<PublicPlayersInner>,
 }
 
-struct PlayersInner {
+struct PublicPlayersInner {
     cache: Cache,
     dirty: Arc<DashSet<i64>>,
     metrics: Arc<Metrics>,
@@ -46,7 +46,7 @@ struct Metrics {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct PlayersStats {
+pub struct PublicPlayersStats {
     pub cache: xlru::Stats,
     pub dirty_players: usize,
     pub load_calls: u64,
@@ -58,14 +58,14 @@ pub(crate) struct PlayersStats {
     pub flush_latency: LatencyStats,
 }
 
-impl Players {
-    pub(crate) fn new(collection: Collection<Document>) -> Self {
+impl PublicPlayers {
+    pub fn new(store: PublicPlayerStore) -> Self {
         let dirty = Arc::new(DashSet::new());
         let metrics = Arc::new(Metrics::default());
 
-        let load_collection = collection.clone();
+        let load_store = store.clone();
         let load_metrics = metrics.clone();
-        let single_collection = collection.clone();
+        let single_store = store.clone();
         let single_metrics = metrics.clone();
         let single_dirty = dirty.clone();
         let batch_metrics = metrics.clone();
@@ -75,12 +75,12 @@ impl Players {
             .with_shards(PLAYER_CACHE_SHARDS)
             .with_batch_save_count(PLAYER_SAVE_BATCH_SIZE)
             .with_loader(move |gid| {
-                let collection = load_collection.clone();
+                let store = load_store.clone();
                 let metrics = load_metrics.clone();
                 async move {
                     metrics.load_calls.fetch_add(1, Ordering::Relaxed);
                     let started = Instant::now();
-                    let result = load_model::<pb::PublicPlayerData>(&collection, gid).await;
+                    let result = store.load(gid).await;
                     metrics.load_latency.record(started.elapsed());
                     match result {
                         Ok(Some(data)) => Ok(Arc::new(PublicPlayer::new(gid, data))),
@@ -95,27 +95,27 @@ impl Players {
                 }
             })
             .with_saver(move |gid, player: Arc<PublicPlayer>| {
-                let collection = single_collection.clone();
+                let store = single_store.clone();
                 let metrics = single_metrics.clone();
                 let dirty = single_dirty.clone();
                 async move {
-                    save_single(&collection, &metrics, gid, &player).await;
+                    save_single(&store, &metrics, gid, &player).await;
                     player.remove_registration_if_clean(|| {
                         dirty.remove(&gid);
                     });
-                    Ok::<(), xmongo::Error>(())
+                    Ok::<(), Error>(())
                 }
             })
             .with_batch_saver(move |entries: Vec<(i64, Arc<PublicPlayer>)>| {
-                let collection = collection.clone();
+                let store = store.clone();
                 let metrics = batch_metrics.clone();
                 async move {
-                    save_batch(&collection, &metrics, entries).await;
-                    Ok::<(), xmongo::Error>(())
+                    save_batch(&store, &metrics, entries).await;
+                    Ok::<(), Error>(())
                 }
             });
         Self {
-            inner: Arc::new(PlayersInner {
+            inner: Arc::new(PublicPlayersInner {
                 cache: XlruCache::new(PLAYER_CACHE_CAPACITY, options),
                 dirty,
                 metrics,
@@ -123,20 +123,20 @@ impl Players {
         }
     }
 
-    pub(crate) async fn read<R>(
+    pub async fn read<R>(
         &self,
         gid: i64,
         read: impl FnOnce(&pb::PublicPlayerData) -> R,
-    ) -> Result<R, CacheError> {
+    ) -> Result<R, PublicPlayerCacheError> {
         let player = self.inner.cache.get_i64(gid).await?;
         Ok(player.read(read))
     }
 
-    pub(crate) async fn update<R>(
+    pub async fn update<R>(
         &self,
         gid: i64,
         update: impl FnOnce(&mut pb::PublicPlayerData) -> (R, bool),
-    ) -> Result<R, CacheError> {
+    ) -> Result<R, PublicPlayerCacheError> {
         let player = self.inner.cache.get_i64(gid).await?;
         let dirty = &self.inner.dirty;
         Ok(player.update(update, || {
@@ -144,7 +144,7 @@ impl Players {
         }))
     }
 
-    pub(crate) async fn flush_dirty(&self) -> Result<usize, CacheError> {
+    pub async fn flush_dirty(&self) -> Result<usize, PublicPlayerCacheError> {
         let gids = self.inner.dirty.iter().map(|gid| *gid).collect::<Vec<_>>();
         if gids.is_empty() {
             return Ok(0);
@@ -167,9 +167,9 @@ impl Players {
         Ok(gids.len())
     }
 
-    pub(crate) fn stats(&self) -> PlayersStats {
+    pub fn stats(&self) -> PublicPlayersStats {
         let metrics = &self.inner.metrics;
-        PlayersStats {
+        PublicPlayersStats {
             cache: self.inner.cache.stats(),
             dirty_players: self.inner.dirty.len(),
             load_calls: metrics.load_calls.load(Ordering::Relaxed),
@@ -184,7 +184,7 @@ impl Players {
 }
 
 async fn save_single(
-    collection: &Collection<Document>,
+    store: &PublicPlayerStore,
     metrics: &Metrics,
     gid: i64,
     player: &PublicPlayer,
@@ -194,7 +194,7 @@ async fn save_single(
     };
     metrics.save_players.fetch_add(1, Ordering::Relaxed);
     let started = Instant::now();
-    let result = save_model(collection, &snapshot).await;
+    let result = store.save(&snapshot).await;
     metrics.save_latency.record(started.elapsed());
     if let Err(error) = result {
         metrics.save_failed.fetch_add(1, Ordering::Relaxed);
@@ -203,7 +203,7 @@ async fn save_single(
 }
 
 async fn save_batch(
-    collection: &Collection<Document>,
+    store: &PublicPlayerStore,
     metrics: &Metrics,
     entries: Vec<(i64, Arc<PublicPlayer>)>,
 ) {
@@ -218,7 +218,7 @@ async fn save_batch(
     let count = snapshots.len() as u64;
     metrics.save_players.fetch_add(count, Ordering::Relaxed);
     let started = Instant::now();
-    let result = save_models(collection, snapshots).await;
+    let result = store.save_batch(snapshots).await;
     metrics.save_latency.record(started.elapsed());
     if let Err(error) = result {
         metrics.save_failed.fetch_add(count, Ordering::Relaxed);

@@ -3750,12 +3750,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "xfastid"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+]
+
+[[package]]
 name = "xframe"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "xetcd",
+ "xfastid",
  "xhttp",
  "xmongo",
  "xnet",
@@ -3793,6 +3801,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "xfastid",
  "xframe",
  "xkk-cache",
  "xkk-common",
@@ -3881,9 +3890,12 @@ dependencies = [
 name = "xkk-persist"
 version = "0.1.0"
 dependencies = [
+ "dashmap",
  "thiserror 2.0.19",
  "tokio",
+ "tracing",
  "xframe",
+ "xkk-common",
  "xkk-protocol",
  "xlru",
 ]
@@ -3907,10 +3919,10 @@ dependencies = [
 name = "xkk-public"
 version = "0.1.0"
 dependencies = [
- "dashmap",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "xfastid",
  "xframe",
  "xkk-cache",
  "xkk-common",
@@ -3918,7 +3930,6 @@ dependencies = [
  "xkk-persist",
  "xkk-protocol",
  "xlog",
- "xlru",
 ]
 
 [[package]]
@@ -3998,6 +4009,7 @@ dependencies = [
  "tokio-tungstenite",
  "tokio_kcp",
  "tracing",
+ "xfastid",
  "xlog",
  "xproto",
  "xutil",
@@ -4037,6 +4049,7 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tracing",
+ "xfastid",
  "xnet",
  "xproto",
 ]

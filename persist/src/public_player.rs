@@ -5,48 +5,38 @@ use std::sync::{
 
 use xkk_protocol::pb;
 
-pub struct PublicPlayer {
-    gid: i64,
+pub(crate) struct PublicPlayer {
     data: RwLock<pb::PublicPlayerData>,
     dirty: AtomicBool,
 }
 
 impl PublicPlayer {
-    pub fn new(gid: i64, mut data: pb::PublicPlayerData) -> Self {
+    pub(crate) fn new(gid: i64, mut data: pb::PublicPlayerData) -> Self {
         assert!(gid > 0, "Public player gid must be positive");
         data.gid = gid;
-        let mail = data.mail.get_or_insert_default();
-        mail.next_mail_id = mail.next_mail_id.max(1);
+        data.mail.get_or_insert_default();
         Self {
-            gid,
             data: RwLock::new(data),
             dirty: AtomicBool::new(false),
         }
     }
 
-    pub fn empty(gid: i64) -> Self {
+    pub(crate) fn empty(gid: i64) -> Self {
         Self::new(
             gid,
             pb::PublicPlayerData {
                 gid,
-                mail: Some(pb::MailData {
-                    next_mail_id: 1,
-                    mails: Vec::new(),
-                }),
+                mail: Some(pb::MailData { mails: Vec::new() }),
             },
         )
     }
 
-    pub fn gid(&self) -> i64 {
-        self.gid
-    }
-
-    pub fn read<R>(&self, read: impl FnOnce(&pb::PublicPlayerData) -> R) -> R {
+    pub(crate) fn read<R>(&self, read: impl FnOnce(&pb::PublicPlayerData) -> R) -> R {
         let data = self.data.read().expect("Public player data lock poisoned");
         read(&data)
     }
 
-    pub fn update<R>(
+    pub(crate) fn update<R>(
         &self,
         update: impl FnOnce(&mut pb::PublicPlayerData) -> (R, bool),
         on_dirty: impl FnOnce(),
@@ -60,21 +50,21 @@ impl PublicPlayer {
         result
     }
 
-    pub fn take_dirty_snapshot(&self) -> Option<pb::PublicPlayerData> {
+    pub(crate) fn take_dirty_snapshot(&self) -> Option<pb::PublicPlayerData> {
         let data = self.data.write().expect("Public player data lock poisoned");
         self.dirty
             .swap(false, Ordering::AcqRel)
             .then(|| data.clone())
     }
 
-    pub fn remove_registration_if_clean(&self, remove: impl FnOnce()) {
+    pub(crate) fn remove_registration_if_clean(&self, remove: impl FnOnce()) {
         let _data = self.data.write().expect("Public player data lock poisoned");
         if !self.dirty.load(Ordering::Acquire) {
             remove();
         }
     }
 
-    pub fn is_dirty(&self) -> bool {
+    pub(crate) fn is_dirty(&self) -> bool {
         self.dirty.load(Ordering::Acquire)
     }
 }
@@ -96,7 +86,6 @@ mod tests {
         player.read(|data| {
             assert_eq!(data.gid, 5);
             let mail = data.mail.as_ref().unwrap();
-            assert_eq!(mail.next_mail_id, 1);
             assert!(mail.mails.is_empty());
         });
         assert!(!player.is_dirty());
@@ -107,21 +96,22 @@ mod tests {
         let player = PublicPlayer::empty(7);
         let mut registered = false;
 
-        let mail_id = player.update(
+        player.update(
             |data| {
                 let mail = data.mail.as_mut().unwrap();
-                let id = mail.next_mail_id;
-                mail.next_mail_id += 1;
-                (id, true)
+                mail.mails.push(pb::Mail {
+                    mail_id: 7,
+                    ..Default::default()
+                });
+                ((), true)
             },
             || registered = true,
         );
 
-        assert_eq!(mail_id, 1);
         assert!(registered);
         assert!(player.is_dirty());
         let snapshot = player.take_dirty_snapshot().unwrap();
-        assert_eq!(snapshot.mail.unwrap().next_mail_id, 2);
+        assert_eq!(snapshot.mail.unwrap().mails[0].mail_id, 7);
         assert!(!player.is_dirty());
         assert!(player.take_dirty_snapshot().is_none());
     }

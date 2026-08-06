@@ -9,9 +9,9 @@ use std::{
 
 use prost::Message;
 use thiserror::Error;
-use xframe::{FrameHandle, ServiceType, xmongo, xrpc::RpcManager};
+use xframe::{FrameHandle, ServiceType, xrpc::RpcManager};
 use xkk_cache::set_logic_owner;
-use xkk_persist::{load_model, save_model};
+use xkk_persist::PlayerStore;
 use xkk_protocol::{code, error_status, ok_status, pb};
 
 use crate::{
@@ -24,7 +24,7 @@ const KIB: usize = 1024;
 #[derive(Debug, Error)]
 pub(crate) enum PlayerError {
     #[error(transparent)]
-    Mongo(#[from] xmongo::Error),
+    Persist(#[from] xkk_persist::Error),
 }
 
 #[derive(Clone, Copy)]
@@ -256,18 +256,18 @@ struct LoginResult {
 }
 
 pub(crate) fn persistence(
-    collection: xmongo::Collection<xmongo::mongodb::bson::Document>,
+    players: PlayerStore,
     metrics: Arc<LoginMetrics>,
 ) -> Persistence<PlayerState, PlayerError> {
-    let load_collection = collection.clone();
+    let load_players = players.clone();
     let load_metrics = metrics;
     Persistence::new(
         move |gid| {
-            let collection = load_collection.clone();
+            let players = load_players.clone();
             let metrics = load_metrics.clone();
             async move {
                 let find_started = Instant::now();
-                let loaded = load_model::<pb::PlayerData>(&collection, gid).await;
+                let loaded = players.load(gid).await;
                 metrics.mongo_find.record(find_started.elapsed());
                 let data = match loaded? {
                     Some(mut data) => {
@@ -277,7 +277,7 @@ pub(crate) fn persistence(
                     None => {
                         let data = default_player(gid);
                         let create_started = Instant::now();
-                        let created = save_model(&collection, &data).await;
+                        let created = players.save(&data).await;
                         metrics.mongo_create.record(create_started.elapsed());
                         created?;
                         data
@@ -287,10 +287,10 @@ pub(crate) fn persistence(
             }
         },
         move |player: SavePlayer<PlayerState>| {
-            let collection = collection.clone();
+            let players = players.clone();
             async move {
                 let data = player.with(|state| state.data.clone());
-                save_model(&collection, &data).await?;
+                players.save(&data).await?;
                 player.with_mut(|state| state.dirty = false);
                 Ok(())
             }

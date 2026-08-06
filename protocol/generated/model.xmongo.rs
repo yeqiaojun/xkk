@@ -201,7 +201,6 @@ impl ::xmongo::BsonPathGetter for PublicPlayerData {
 #[inline]
 fn __xmongo_to_bson_mail_data(value: &MailData) -> ::xmongo::Result<::xmongo::mongodb::bson::Bson> {
     let mut doc = ::xmongo::mongodb::bson::Document::new();
-    doc.insert("next", ::xmongo::mongodb::bson::Bson::Int64(value.next_mail_id));
     if !value.mails.is_empty() {
         let mut array = Vec::with_capacity(value.mails.len());
         for item in &value.mails {
@@ -216,9 +215,6 @@ fn __xmongo_to_bson_mail_data(value: &MailData) -> ::xmongo::Result<::xmongo::mo
 fn __xmongo_from_bson_mail_data(value: &::xmongo::mongodb::bson::Bson) -> ::xmongo::Result<MailData> {
     let doc = ::xmongo::bson_document(value, "MailData")?;
     let mut out = MailData::default();
-    if let Some(value) = doc.get("next") {
-        out.next_mail_id = ::xmongo::bson_i64(value, "next")?;
-    }
     if let Some(value) = doc.get("mails") {
         let array = ::xmongo::bson_array(value, "mails")?;
         out.mails.reserve(array.len());

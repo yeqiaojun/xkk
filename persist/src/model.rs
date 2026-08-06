@@ -6,7 +6,7 @@ use xframe::xmongo::{
     },
 };
 
-pub async fn load_model<T>(
+pub(crate) async fn load_model<T>(
     collection: &Collection<Document>,
     id: impl Into<Bson>,
 ) -> xmongo::Result<Option<T>>
@@ -22,7 +22,10 @@ where
         .transpose()
 }
 
-pub async fn save_model<T>(collection: &Collection<Document>, model: &T) -> xmongo::Result<()>
+pub(crate) async fn save_model<T>(
+    collection: &Collection<Document>,
+    model: &T,
+) -> xmongo::Result<()>
 where
     T: BsonPathGetter,
 {
@@ -42,7 +45,7 @@ where
     Ok(())
 }
 
-pub async fn save_models<T>(
+pub(crate) async fn save_models<T>(
     collection: &Collection<Document>,
     models: impl IntoIterator<Item = T>,
 ) -> xmongo::Result<usize>

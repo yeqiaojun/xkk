@@ -171,7 +171,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
         let mongo = handle
             .mongo()
             .expect("Gate FrameConfig always enables Mongo");
-        let _collections = xkk_persist::Collections::new(mongo)?;
+        let _database = xkk_persist::Database::new(mongo)?;
         let application_redis = redis.clone();
         let online_count = Arc::new(AtomicI32::new(0));
         let sessions = ClientSessions::new(SessionConfig::HARD_LIMITS);

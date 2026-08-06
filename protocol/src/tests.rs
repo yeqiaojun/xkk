@@ -114,7 +114,6 @@ fn generated_xmongo_traits_roundtrip_public_player_data() {
     let player = pb::PublicPlayerData {
         gid: 1002,
         mail: Some(pb::MailData {
-            next_mail_id: 8,
             mails: vec![pb::Mail {
                 mail_id: 7,
                 title: "welcome".to_string(),

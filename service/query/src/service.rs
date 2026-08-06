@@ -92,8 +92,8 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
         let mongo = handle
             .mongo()
             .expect("Query FrameConfig always enables Mongo");
-        let collections = xkk_persist::Collections::new(mongo)?;
-        let api = QueryApi::new(collections.players());
+        let database = xkk_persist::Database::new(mongo)?;
+        let api = QueryApi::new(database.players());
         let ready_handle = handle.clone();
         let gamer_info = api.clone();
         let http = xframe::xhttp::App::new()

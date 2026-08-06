@@ -6,9 +6,8 @@ use xframe::{
 };
 use xkk_cache::load_online;
 use xkk_common::unix_seconds;
+use xkk_persist::{PublicPlayerCacheError, PublicPlayers};
 use xkk_protocol::{code, error_status, ok_status, pb};
-
-use crate::players::{CacheError, Players};
 
 const MAIL_READ: i32 = 1;
 const MAIL_CLAIMED: i32 = 2;
@@ -23,11 +22,11 @@ const RPC_CALL_TIMEOUT: Duration = Duration::from_secs(3);
 pub(crate) struct MailService {
     frame: FrameHandle,
     redis: xframe::xredis::Client,
-    players: Players,
+    players: PublicPlayers,
 }
 
 impl MailService {
-    pub fn new(frame: FrameHandle, redis: xframe::xredis::Client, players: Players) -> Self {
+    pub fn new(frame: FrameHandle, redis: xframe::xredis::Client, players: PublicPlayers) -> Self {
         Self {
             frame,
             redis,
@@ -259,13 +258,7 @@ impl MailService {
             .update(gid, |data| {
                 let now = unix_seconds();
                 let data = mail_mut(data);
-                let mail_id = data.next_mail_id.max(1);
-                let Some(next_mail_id) = mail_id.checked_add(1) else {
-                    return (
-                        Err(error_status(code::CONFLICT, "mail id exhausted")),
-                        false,
-                    );
-                };
+                let mail_id = new_mail_id();
                 message.mail_id = mail_id;
                 message.send_time = if message.send_time == 0 {
                     now
@@ -287,7 +280,6 @@ impl MailService {
                     );
                 }
 
-                data.next_mail_id = next_mail_id;
                 message.state = 0;
                 data.mails.push(message.clone());
                 data.mails.sort_unstable_by_key(|mail| mail.mail_id);
@@ -378,7 +370,7 @@ fn mail_mut(data: &mut pb::PublicPlayerData) -> &mut pb::MailData {
         .expect("persist normalizes Public player Mail data")
 }
 
-fn cache_status(gid: i64, operation: &'static str, error: CacheError) -> pb::Status {
+fn cache_status(gid: i64, operation: &'static str, error: PublicPlayerCacheError) -> pb::Status {
     tracing::error!(gid, operation, %error, "Public player cache operation failed");
     error_status(code::INTERNAL, "Public player data unavailable")
 }
@@ -398,6 +390,10 @@ fn valid_mail_ids(mail_ids: Vec<i64>) -> Option<Vec<i64>> {
         .iter()
         .all(|mail_id| *mail_id > 0 && seen.insert(*mail_id))
         .then_some(mail_ids)
+}
+
+fn new_mail_id() -> i64 {
+    xfastid::gen_int64_id()
 }
 
 macro_rules! status_response {
@@ -434,9 +430,17 @@ mod tests {
     }
 
     #[test]
+    fn new_mail_ids_use_the_global_fastid_generator() {
+        let first = new_mail_id();
+        let second = new_mail_id();
+
+        assert!(first > 0);
+        assert!(second > first);
+    }
+
+    #[test]
     fn claim_validates_every_mail_before_mutating() {
         let mut data = pb::MailData {
-            next_mail_id: 3,
             mails: vec![
                 pb::Mail {
                     mail_id: 1,

@@ -740,9 +740,6 @@ pub struct PublicPlayerData {
 #[serde(default)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct MailData {
-    /// @inject_tag: bson:"next"
-    #[prost(int64, tag = "1")]
-    pub next_mail_id: i64,
     /// @inject_tag: bson:"mails,omitempty"
     #[prost(message, repeated, tag = "2")]
     pub mails: ::prost::alloc::vec::Vec<Mail>,

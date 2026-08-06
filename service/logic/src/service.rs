@@ -111,12 +111,12 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
         let redis = handle
             .redis()
             .expect("Logic FrameConfig always enables Redis");
-        let collections = xkk_persist::Collections::new(mongo)?;
+        let database = xkk_persist::Database::new(mongo)?;
         let application_redis = redis.clone();
         let login_metrics = Arc::new(LoginMetrics::default());
         let runtime = LogicRuntime::new(
             logic_config,
-            player::persistence(collections.players(), login_metrics.clone()),
+            player::persistence(database.players(), login_metrics.clone()),
         );
         let online_count = Arc::new(AtomicI32::new(0));
         player::register_handlers(

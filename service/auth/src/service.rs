@@ -94,14 +94,9 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
         let redis = frame
             .redis()
             .expect("Auth FrameConfig always enables Redis");
-        let collections = xkk_persist::Collections::new(mongo)?;
+        let database = xkk_persist::Database::new(mongo)?;
         let application_redis = redis.clone();
-        let api = AuthApi::new(
-            frame.clone(),
-            collections.accounts(),
-            redis,
-            &config.security,
-        );
+        let api = AuthApi::new(frame.clone(), database.accounts(), redis, &config.security);
         let login = api.clone();
         let use_role = api.clone();
         let ready_handle = frame.clone();

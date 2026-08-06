@@ -4,7 +4,6 @@ use thiserror::Error;
 use xredis::{self, redis};
 
 const ONLINE_TTL_SECONDS: i64 = 30 * 24 * 60 * 60;
-const NEXT_GID_KEY: &str = "xkk:next_gid";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct OnlineData {
@@ -33,16 +32,6 @@ pub type Result<T> = std::result::Result<T, OnlineError>;
 
 pub fn online_key(gid: i64) -> String {
     format!("gamer:{gid}")
-}
-
-pub async fn allocate_gid(client: &xredis::Client) -> Result<i64> {
-    let mut connection = client.connection();
-    let gid = redis::cmd("INCR")
-        .arg(NEXT_GID_KEY)
-        .query_async(&mut connection)
-        .await
-        .map_err(xredis::Error::from)?;
-    Ok(gid)
 }
 
 pub async fn load_online(client: &xredis::Client, gid: i64) -> Result<Option<OnlineData>> {

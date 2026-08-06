@@ -1,15 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
 use tokio::sync::Semaphore;
-use xframe::{
-    FrameHandle, ServiceType,
-    xmongo::{self, mongodb::bson::Document},
-    xservice::ServiceStatus,
-};
-use xkk_cache::{allocate_gid, enqueue_login, leave_login_queue, load_online, set_token};
+use xframe::{FrameHandle, ServiceType, xservice::ServiceStatus};
+use xkk_cache::{enqueue_login, leave_login_queue, load_online, set_token};
 use xkk_common::{credential_hash, unix_millis, unix_seconds};
 use xkk_config::Security;
-use xkk_persist::{load_model, save_model};
+use xkk_persist::AccountStore;
 use xkk_protocol::{code, error_status, ok_status, pb};
 use xtoken::TokenCoder;
 
@@ -34,7 +30,7 @@ const ACCOUNT_LOCK_TTL: Duration = Duration::from_secs(5);
 pub(crate) struct AuthApi {
     frame: FrameHandle,
     redis: xframe::xredis::Client,
-    accounts: xmongo::Collection<Document>,
+    accounts: AccountStore,
     token: TokenCoder,
     login_global: xframe::xredis::RateLimiter,
     login_per_ip: xframe::xredis::RateLimiter,
@@ -50,7 +46,7 @@ pub(crate) struct AuthApi {
 impl AuthApi {
     pub(crate) fn new(
         frame: FrameHandle,
-        accounts: xmongo::Collection<Document>,
+        accounts: AccountStore,
         redis: xframe::xredis::Client,
         security: &Security,
     ) -> Self {
@@ -218,14 +214,11 @@ impl AuthApi {
         credential: &str,
     ) -> Result<pb::AccountData, pb::Status> {
         let hash = credential_hash(account, credential);
-        match load_model::<pb::AccountData>(&self.accounts, account).await {
+        match self.accounts.load(account).await {
             Ok(Some(account)) if account.credential_hash == hash => Ok(account),
             Ok(Some(_)) => Err(error_status(code::UNAUTHENTICATED, "credential mismatch")),
             Ok(None) => {
-                let gid = allocate_gid(&self.redis).await.map_err(|error| {
-                    tracing::error!(account, %error, "Auth gid allocation failed");
-                    error_status(code::INTERNAL, "gid allocation failed")
-                })?;
+                let gid = xfastid::gen_int64_id();
                 let account = pb::AccountData {
                     account: account.to_string(),
                     credential_hash: hash,
@@ -238,7 +231,7 @@ impl AuthApi {
                     }],
                     created_at: unix_seconds(),
                 };
-                save_model(&self.accounts, &account).await.map_err(|error| {
+                self.accounts.save(&account).await.map_err(|error| {
                     tracing::error!(account = %account.account, %error, "Auth account create failed");
                     error_status(code::INTERNAL, "account create failed")
                 })?;

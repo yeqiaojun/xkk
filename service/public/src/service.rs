@@ -6,8 +6,9 @@ use xframe::{
     Application, ApplicationResult, DiscoveryConfig, FrameConfig, FrameHandle, NodeConfig,
     RpcConfig, ServiceType, ShutdownConfig,
 };
+use xkk_persist::PublicPlayers;
 
-use crate::{mail::MailService, players::Players};
+use crate::mail::MailService;
 
 pub use xkk_config::PublicConfig as Config;
 
@@ -96,8 +97,8 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
         let redis = handle
             .redis()
             .expect("Public FrameConfig always enables Redis");
-        let collections = xkk_persist::Collections::new(mongo)?;
-        let players = Players::new(collections.public_players());
+        let database = xkk_persist::Database::new(mongo)?;
+        let players = PublicPlayers::new(database.public_players());
         let mail = MailService::new(handle, redis, players.clone());
         mail.register_handlers(prepared.rpc())?;
         let frame = prepared
@@ -126,14 +127,14 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
 
 struct PublicApplication {
     cluster: String,
-    players: Players,
+    players: PublicPlayers,
     metrics_interval: Duration,
     save_task: Option<JoinHandle<()>>,
     metrics_task: Option<JoinHandle<()>>,
 }
 
 impl PublicApplication {
-    fn new(cluster: String, players: Players, metrics_interval: Duration) -> Self {
+    fn new(cluster: String, players: PublicPlayers, metrics_interval: Duration) -> Self {
         Self {
             cluster,
             players,
@@ -171,7 +172,7 @@ impl Application for PublicApplication {
     }
 }
 
-fn spawn_player_save(players: Players, interval: Duration) -> JoinHandle<()> {
+fn spawn_player_save(players: PublicPlayers, interval: Duration) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.tick().await;
@@ -200,7 +201,7 @@ async fn stop_task(task: &mut Option<JoinHandle<()>>, name: &'static str) {
 
 fn spawn_metrics(
     frame: FrameHandle,
-    players: Players,
+    players: PublicPlayers,
     interval: Duration,
 ) -> Option<JoinHandle<()>> {
     if interval.is_zero() {

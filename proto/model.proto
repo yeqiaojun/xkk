@@ -26,6 +26,6 @@ message PublicPlayerData {
 }
 
 message MailData {
-  int64 next_mail_id = 1; // @inject_tag: bson:"next"
+  reserved 1;
   repeated Mail mails = 2; // @inject_tag: bson:"mails,omitempty"
 }
