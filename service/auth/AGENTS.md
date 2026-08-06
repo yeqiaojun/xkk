@@ -10,7 +10,8 @@
   increments the selected Gate in the local snapshot so a burst does not reuse one stale minimum;
   the next Redis refresh reconciles the estimate. Auth never opens a Gate link or writes dynamic
   load to etcd.
-- Keep queue and rate budgets explicit in YAML and reject overload before expensive account work.
+- Keep queue, rate, and lock budgets as commented constants beside admission. Reject overload
+  before expensive account work and emit an error log when a hard limit is reached.
 - Keep `lib.rs` as the public package surface, `service.rs` as process composition/lifecycle, and
   `api.rs` as the cohesive login/use-role workflow. Do not split individual workflow steps into
   tiny modules.

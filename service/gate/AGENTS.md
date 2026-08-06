@@ -10,7 +10,9 @@
 - Gate authenticates Login/Reconnect, binds the xnet player route, and forwards Player/Item RPC to
   Logic and Mail RPC to Public.
 - Login and Reconnect responses publish the Gate-side session ID required by the next reconnect.
-- Player-bound messages enter the bounded outbox by default. Control IDs `1..99` bypass it.
+- Player-bound messages enter the bounded outbox by default. xproto control IDs `1..99` and the
+  explicitly enumerated Ping/Login/Reconnect/Logout/Kick session responses bypass it; adding an
+  application Message ID range must not silently create more bypasses.
 - Reconnect requires monotonic client sequence, matching ACK, retained outbox continuity, and the
   previous Gate session. A gap fails resume and requires a fresh login.
 - External handshake/session admission and write queues must remain explicitly bounded.

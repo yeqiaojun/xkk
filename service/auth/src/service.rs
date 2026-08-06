@@ -12,6 +12,14 @@ use xkk_protocol::pb;
 use crate::api::{AuthApi, LOGIN_PATH, USE_ROLE_PATH};
 pub use xkk_config::AuthConfig as Config;
 
+// Auth uses fixed process budgets. If these limits are reached, the owning path rejects work and
+// emits an error log; operators scale the role instead of changing per-instance YAML.
+const RPC_PENDING_CAPACITY: usize = 1_024;
+const HTTP_MAX_BODY_BYTES: usize = 4_096;
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+const GATE_LOAD_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+const METRICS_REPORT_INTERVAL: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Error)]
 pub enum ServiceError {
     #[error(transparent)]
@@ -26,6 +34,8 @@ pub enum ServiceError {
     LogClose(#[source] io::Error),
     #[error(transparent)]
     Mongo(#[from] xmongo::Error),
+    #[error(transparent)]
+    Persist(#[from] xkk_persist::Error),
     #[error(transparent)]
     Redis(#[from] xframe::xredis::Error),
     #[error(transparent)]
@@ -45,11 +55,9 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
         &config.node.advertise_host,
         config.node.http_port,
     )?
-    .with_versions(config.node.pro_version, config.node.conf_version)
+    .with_versions(config.version.program, config.version.conf)
     .with_meta_data(metadata);
-    let discovery = DiscoveryConfig::new(&config.infrastructure.etcd_dsn)?.with_lease_ttl(
-        Duration::from_secs(config.infrastructure.etcd_lease_ttl_seconds),
-    )?;
+    let discovery = DiscoveryConfig::new(&config.infrastructure.etcd_dsn)?;
     Ok(FrameConfig::new(node)
         .with_discovery(discovery)
         .with_mongo(xmongo::Config::new(&config.infrastructure.mongo_dsn)?)
@@ -60,10 +68,8 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
             "{}:{}",
             config.node.listen_host, config.node.http_port
         ))?)
-        .with_rpc(RpcConfig::new(config.capacity.rpc_pending)?)
-        .with_shutdown(ShutdownConfig::new(Duration::from_secs(
-            config.runtime.shutdown_drain_seconds,
-        ))?))
+        .with_rpc(RpcConfig::new(RPC_PENDING_CAPACITY)?)
+        .with_shutdown(ShutdownConfig::new(SHUTDOWN_DRAIN_TIMEOUT)?))
 }
 
 pub fn config_path() -> Result<PathBuf, ServiceError> {
@@ -75,10 +81,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
     let log_options = config.log.options("logs/auth.log");
     let frame_config = frame_config(&config)?;
     let cluster = config.node.cluster.clone();
-    let service_load_interval = Duration::from_secs(config.runtime.service_load_interval_seconds);
-    let metrics_interval = Duration::from_secs(config.runtime.metrics_interval_seconds);
     let instance_id = config.node.instance_id;
-    let max_body_bytes = config.capacity.max_http_body_bytes;
     let log_guard = xlog::init_global(log_options)?;
 
     let service: Result<(), ServiceError> = async {
@@ -91,13 +94,19 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
         let redis = frame
             .redis()
             .expect("Auth FrameConfig always enables Redis");
+        let collections = xkk_persist::Collections::new(mongo)?;
         let application_redis = redis.clone();
-        let api = AuthApi::new(frame.clone(), mongo, redis, &config);
+        let api = AuthApi::new(
+            frame.clone(),
+            collections.accounts(),
+            redis,
+            &config.security,
+        );
         let login = api.clone();
         let use_role = api.clone();
         let ready_handle = frame.clone();
         let http = xframe::xhttp::App::new()
-            .with_max_body_bytes(max_body_bytes)
+            .with_max_body_bytes(HTTP_MAX_BODY_BYTES)
             .route(LOGIN_PATH, move |ctx, request: pb::AuthLoginReq| {
                 let api = login.clone();
                 async move { Ok(api.login(ctx, request).await) }
@@ -122,8 +131,8 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
             .start(AuthApplication::new(
                 cluster,
                 application_redis,
-                service_load_interval,
-                metrics_interval,
+                GATE_LOAD_REFRESH_INTERVAL,
+                METRICS_REPORT_INTERVAL,
                 api,
             ))
             .await?;
@@ -239,10 +248,20 @@ fn spawn_metrics(frame: FrameHandle, api: AuthApi, interval: Duration) -> Option
     }
     Some(tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
+        let mut last_rpc_pending_rejected = 0;
         ticker.tick().await;
         loop {
             ticker.tick().await;
             let stats = frame.stats();
+            if stats.rpc.pending_rejected > last_rpc_pending_rejected {
+                tracing::error!(
+                    rejected = stats.rpc.pending_rejected - last_rpc_pending_rejected,
+                    total_rejected = stats.rpc.pending_rejected,
+                    limit = RPC_PENDING_CAPACITY,
+                    "Auth RPC pending hard limit exceeded"
+                );
+                last_rpc_pending_rejected = stats.rpc.pending_rejected;
+            }
             tracing::info!(
                 frame_state = ?stats.state,
                 available_request_slots = api.available_request_slots(),
@@ -272,12 +291,17 @@ mod tests {
 
     #[test]
     fn example_config_builds_http_only_auth() {
-        let config = Config::parse(include_str!("../../../config/auth.yaml")).unwrap();
+        let config = Config::parse(
+            include_str!("../../../config/common.yaml"),
+            include_str!("../../../config/auth.yaml"),
+            include_str!("../../../config/version.json"),
+        )
+        .unwrap();
         let frame = frame_config(&config).unwrap();
 
         assert!(frame.http.is_some());
         assert!(frame.service_server.is_none());
-        assert_eq!(config.runtime.service_load_interval_seconds, 3);
+        assert_eq!(frame.rpc.pending_capacity(), RPC_PENDING_CAPACITY);
         assert_eq!(
             frame.node.meta_data().get("login_path").unwrap(),
             LOGIN_PATH

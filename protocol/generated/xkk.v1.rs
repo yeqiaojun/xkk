@@ -539,56 +539,6 @@ pub struct GamerInfoRsp {
     pub players: ::prost::alloc::vec::Vec<PlayerInfo>,
 }
 #[derive(serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ConfigKeyReq {
-    #[prost(string, tag = "1")]
-    pub version: ::prost::alloc::string::String,
-}
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ConfigKeyRsp {
-    #[prost(message, optional, tag = "1")]
-    pub status: ::core::option::Option<Status>,
-    #[prost(string, tag = "2")]
-    pub key: ::prost::alloc::string::String,
-}
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ConfigManifestReq {
-    #[prost(string, tag = "1")]
-    pub version: ::prost::alloc::string::String,
-}
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct ConfigFile {
-    /// @inject_tag: bson:"nm"
-    #[prost(string, tag = "1")]
-    pub name: ::prost::alloc::string::String,
-    /// @inject_tag: bson:"path"
-    #[prost(string, tag = "2")]
-    pub path: ::prost::alloc::string::String,
-    /// @inject_tag: bson:"md5"
-    #[prost(string, tag = "3")]
-    pub md5: ::prost::alloc::string::String,
-}
-#[derive(serde::Serialize, serde::Deserialize)]
-#[serde(default)]
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ConfigManifestRsp {
-    #[prost(message, optional, tag = "1")]
-    pub status: ::core::option::Option<Status>,
-    #[prost(string, tag = "2")]
-    pub version: ::prost::alloc::string::String,
-    #[prost(string, tag = "3")]
-    pub base_url: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag = "4")]
-    pub files: ::prost::alloc::vec::Vec<ConfigFile>,
-}
-#[derive(serde::Serialize, serde::Deserialize)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
 pub enum MsgId {
@@ -621,10 +571,6 @@ pub enum MsgId {
     AuthUseRoleRsp = 2003,
     GamerInfoReq = 2100,
     GamerInfoRsp = 2101,
-    ConfigKeyReq = 2102,
-    ConfigKeyRsp = 2103,
-    ConfigManifestReq = 2104,
-    ConfigManifestRsp = 2105,
     AckNtf = 3000,
     PingReq = 3001,
     PingRsp = 3002,
@@ -677,10 +623,6 @@ impl MsgId {
             Self::AuthUseRoleRsp => "AUTH_USE_ROLE_RSP",
             Self::GamerInfoReq => "GAMER_INFO_REQ",
             Self::GamerInfoRsp => "GAMER_INFO_RSP",
-            Self::ConfigKeyReq => "CONFIG_KEY_REQ",
-            Self::ConfigKeyRsp => "CONFIG_KEY_RSP",
-            Self::ConfigManifestReq => "CONFIG_MANIFEST_REQ",
-            Self::ConfigManifestRsp => "CONFIG_MANIFEST_RSP",
             Self::AckNtf => "ACK_NTF",
             Self::PingReq => "PING_REQ",
             Self::PingRsp => "PING_RSP",
@@ -730,10 +672,6 @@ impl MsgId {
             "AUTH_USE_ROLE_RSP" => Some(Self::AuthUseRoleRsp),
             "GAMER_INFO_REQ" => Some(Self::GamerInfoReq),
             "GAMER_INFO_RSP" => Some(Self::GamerInfoRsp),
-            "CONFIG_KEY_REQ" => Some(Self::ConfigKeyReq),
-            "CONFIG_KEY_RSP" => Some(Self::ConfigKeyRsp),
-            "CONFIG_MANIFEST_REQ" => Some(Self::ConfigManifestReq),
-            "CONFIG_MANIFEST_RSP" => Some(Self::ConfigManifestRsp),
             "ACK_NTF" => Some(Self::AckNtf),
             "PING_REQ" => Some(Self::PingReq),
             "PING_RSP" => Some(Self::PingRsp),
@@ -786,36 +724,26 @@ pub struct PlayerData {
     #[prost(map = "int32, int64", tag = "3")]
     pub items: ::std::collections::HashMap<i32, i64>,
 }
-/// @rust_bson_trait mail
+/// @rust_bson_trait public_player
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct GamerMailData {
+pub struct PublicPlayerData {
     /// @inject_tag: bson:"_id"
     #[prost(int64, tag = "1")]
     pub gid: i64,
-    /// @inject_tag: bson:"next"
-    #[prost(int64, tag = "2")]
-    pub next_mail_id: i64,
-    /// @inject_tag: bson:"mails,omitempty"
-    #[prost(message, repeated, tag = "3")]
-    pub mails: ::prost::alloc::vec::Vec<Mail>,
+    /// @inject_tag: bson:"mail"
+    #[prost(message, optional, tag = "2")]
+    pub mail: ::core::option::Option<MailData>,
 }
-/// @rust_bson_trait config
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 #[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ConfigManifestData {
-    /// @inject_tag: bson:"_id"
-    #[prost(string, tag = "1")]
-    pub version: ::prost::alloc::string::String,
-    /// @inject_tag: bson:"key"
-    #[prost(string, tag = "2")]
-    pub key: ::prost::alloc::string::String,
-    /// @inject_tag: bson:"url"
-    #[prost(string, tag = "3")]
-    pub base_url: ::prost::alloc::string::String,
-    /// @inject_tag: bson:"files,omitempty"
-    #[prost(message, repeated, tag = "4")]
-    pub files: ::prost::alloc::vec::Vec<ConfigFile>,
+pub struct MailData {
+    /// @inject_tag: bson:"next"
+    #[prost(int64, tag = "1")]
+    pub next_mail_id: i64,
+    /// @inject_tag: bson:"mails,omitempty"
+    #[prost(message, repeated, tag = "2")]
+    pub mails: ::prost::alloc::vec::Vec<Mail>,
 }

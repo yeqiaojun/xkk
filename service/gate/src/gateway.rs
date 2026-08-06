@@ -27,21 +27,23 @@ use crate::{
     stats::{LoginMetrics, LoginStats},
 };
 
+// These bounds define one Gate process. Hitting them rejects work and emits an error log; scaling
+// is done by adding Gate instances rather than editing per-instance YAML.
+const CLIENT_MAILBOX_CAPACITY: usize = 64;
+const RPC_CALL_TIMEOUT: Duration = Duration::from_secs(3);
+const SHUTDOWN_CLEANUP_CONCURRENCY: usize = 64;
+
 #[derive(Debug, Clone)]
 pub(crate) struct GatewaySettings {
     pub gate_id: i32,
-    pub client_mailbox: usize,
-    pub rpc_timeout: Duration,
     pub token_secret: String,
     pub token_expire_seconds: i64,
-    pub shutdown_cleanup_concurrency: usize,
 }
 
 #[derive(Clone)]
 pub(crate) struct Gateway {
     state: Arc<GatewayState>,
     workers: Arc<Mutex<HashMap<SessionId, ClientWorker>>>,
-    client_mailbox: usize,
 }
 
 impl Gateway {
@@ -54,20 +56,8 @@ impl Gateway {
         settings: GatewaySettings,
     ) -> Self {
         assert!(
-            settings.client_mailbox > 0,
-            "Gate client mailbox must be positive"
-        );
-        assert!(
-            !settings.rpc_timeout.is_zero(),
-            "Gate RPC timeout must be positive"
-        );
-        assert!(
             settings.token_expire_seconds > 0,
             "Gate token expiry must be positive"
-        );
-        assert!(
-            settings.shutdown_cleanup_concurrency > 0,
-            "Gate shutdown cleanup concurrency must be positive"
         );
         Self {
             state: Arc::new(GatewayState {
@@ -77,20 +67,18 @@ impl Gateway {
                 sessions,
                 token: TokenCoder::new(settings.token_secret, settings.token_expire_seconds),
                 gate_id: settings.gate_id,
-                rpc_timeout: settings.rpc_timeout,
+                rpc_timeout: RPC_CALL_TIMEOUT,
                 online_count,
                 login_metrics: LoginMetrics::default(),
                 draining: AtomicBool::new(false),
-                shutdown_cleanup_concurrency: settings.shutdown_cleanup_concurrency,
             }),
             workers: Arc::new(Mutex::new(HashMap::new())),
-            client_mailbox: settings.client_mailbox,
         }
     }
 
     pub fn register_rpc(&self, rpc: &RpcManager) -> xframe::xrpc::Result<()> {
         let kick_state = self.state.clone();
-        rpc.register_typed::<pb::KickSessionReq, _, _>(move |_ctx, request| {
+        rpc.register::<pb::KickSessionReq, _, _>(move |_ctx, request| {
             let state = kick_state.clone();
             async move { Ok(state.kick_session(request).await) }
         })?;
@@ -139,7 +127,7 @@ impl Gateway {
         self.state.online_count.store(0, Ordering::Release);
         let mut cleanup = tokio::task::JoinSet::new();
         for session in sessions {
-            if cleanup.len() == self.state.shutdown_cleanup_concurrency {
+            if cleanup.len() == SHUTDOWN_CLEANUP_CONCURRENCY {
                 let _ = cleanup.join_next().await;
             }
             let state = self.state.clone();
@@ -172,7 +160,7 @@ impl GatewayState {
     async fn cleanup_shutdown_session(&self, session: crate::session::ClosingSession) {
         if let Err(error) = self
             .rpc
-            .send_server_typed(
+            .send_server(
                 ServiceType::Logic,
                 session.routes.logic_id,
                 &pb::LogicDisconnectNtf {
@@ -212,7 +200,7 @@ impl Handler for Gateway {
             return;
         }
         let session_id = conn.session_id();
-        let (sender, mut receiver) = mpsc::channel(self.client_mailbox);
+        let (sender, mut receiver) = mpsc::channel(CLIENT_MAILBOX_CAPACITY);
         let state = self.state.clone();
         let worker_conn = conn.clone();
         let task = tokio::spawn(async move {
@@ -257,10 +245,11 @@ impl Handler for Gateway {
         };
         if let Err(error) = sender.try_send(frame) {
             let frame = error.into_inner();
-            tracing::warn!(
+            tracing::error!(
                 session_id = frame.session_id,
                 peer_addr = %frame.peer_addr,
-                "Gate client mailbox overloaded"
+                limit = CLIENT_MAILBOX_CAPACITY,
+                "Gate client mailbox hard limit exceeded"
             );
             frame.conn.close();
         }
@@ -302,7 +291,6 @@ struct GatewayState {
     online_count: Arc<AtomicI32>,
     login_metrics: LoginMetrics,
     draining: AtomicBool,
-    shutdown_cleanup_concurrency: usize,
 }
 
 impl GatewayState {
@@ -581,7 +569,7 @@ impl GatewayState {
         let rpc_started = Instant::now();
         let logic_response = self
             .frame
-            .call_player_to_typed(
+            .call_player_to(
                 ServiceType::Logic,
                 logic_id,
                 request.gid,
@@ -742,7 +730,7 @@ impl GatewayState {
         };
         let logic_response: pb::LogicLoginRsp = match self
             .frame
-            .call_player_to_typed(
+            .call_player_to(
                 ServiceType::Logic,
                 routes.logic_id,
                 request.gid,
@@ -884,7 +872,7 @@ impl GatewayState {
         self.decrement_online();
         let _ = self
             .frame
-            .send_to_typed(
+            .send_to(
                 ServiceType::Logic,
                 routes.logic_id,
                 &pb::LogicDisconnectNtf {
@@ -952,7 +940,7 @@ impl GatewayState {
 
         let response: Req::Response = match self
             .frame
-            .call_player_to_typed(
+            .call_player_to(
                 service_type,
                 server_id,
                 gid,
@@ -1036,7 +1024,7 @@ impl GatewayState {
         self.decrement_online();
         if let Err(error) = self
             .frame
-            .send_to_typed(
+            .send_to(
                 ServiceType::Logic,
                 routes.logic_id,
                 &pb::LogicDisconnectNtf {

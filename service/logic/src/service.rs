@@ -20,6 +20,15 @@ use xkk_cache::{delete_service_online, publish_service_online, service_online_tt
 use crate::{LogicConfig, LogicRuntime, player, stats::LoginMetrics};
 pub use xkk_config::LogicConfig as Config;
 
+// These limits are product/runtime invariants. Keep them next to the Logic
+// composition that consumes them; changing one requires code review and a build.
+const SERVICE_WRITE_QUEUE_CAPACITY: usize = 1_024;
+const RPC_PENDING_CAPACITY: usize = 100_000;
+const RPC_CALL_TIMEOUT: Duration = Duration::from_secs(3);
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+const SERVICE_LOAD_PUBLISH_INTERVAL: Duration = Duration::from_secs(3);
+const METRICS_REPORT_INTERVAL: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Error)]
 pub enum ServiceError {
     #[error(transparent)]
@@ -32,6 +41,8 @@ pub enum ServiceError {
     LogClose(#[source] io::Error),
     #[error(transparent)]
     Mongo(#[from] xframe::xmongo::Error),
+    #[error(transparent)]
+    Persist(#[from] xkk_persist::Error),
     #[error(transparent)]
     Redis(#[from] xframe::xredis::Error),
     #[error(transparent)]
@@ -49,13 +60,11 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
         &config.node.advertise_host,
         config.node.service_port,
     )?
-    .with_versions(config.node.pro_version, config.node.conf_version)
+    .with_versions(config.version.program, config.version.conf)
     .with_meta_data(metadata);
-    let discovery = DiscoveryConfig::new(&config.infrastructure.etcd_dsn)?.with_lease_ttl(
-        Duration::from_secs(config.infrastructure.etcd_lease_ttl_seconds),
-    )?;
+    let discovery = DiscoveryConfig::new(&config.infrastructure.etcd_dsn)?;
     let transport = xframe::xnet::TransportOptions::default()
-        .with_write_queue_capacity(config.capacity.write_queue);
+        .with_write_queue_capacity(SERVICE_WRITE_QUEUE_CAPACITY);
     let listener = xframe::xnet::ServerConfig::with_listener(xframe::xnet::ListenEndpoint::tcp(
         format!("{}:{}", config.node.listen_host, config.node.service_port),
     ))
@@ -71,24 +80,12 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
         .with_redis(xframe::xredis::RedisConfig::new(
             &config.infrastructure.redis_dsn,
         )?)
-        .with_rpc(RpcConfig::new(config.capacity.rpc_pending)?)
-        .with_shutdown(ShutdownConfig::new(Duration::from_secs(
-            config.runtime.shutdown_drain_seconds,
-        ))?))
+        .with_rpc(RpcConfig::new(RPC_PENDING_CAPACITY)?)
+        .with_shutdown(ShutdownConfig::new(SHUTDOWN_DRAIN_TIMEOUT)?))
 }
 
-fn logic_config(config: &Config) -> LogicConfig {
-    LogicConfig {
-        resident_capacity: config.capacity.resident_players,
-        ttl: Duration::from_secs(config.runtime.player_ttl_seconds),
-        shards: config.capacity.mailbox_shards,
-        batch_save_count: config.capacity.batch_save_count,
-        max_dirty_players: config.capacity.max_dirty_players,
-        max_inflight_calls: config.capacity.max_inflight_calls,
-        max_inflight_kib: config.capacity.max_inflight_kib,
-        max_calls_per_gid: config.capacity.max_calls_per_gid,
-        max_kib_per_gid: config.capacity.max_kib_per_gid,
-    }
+fn logic_config() -> LogicConfig {
+    LogicConfig::HARD_LIMITS
 }
 
 pub fn config_path() -> Result<PathBuf, ServiceError> {
@@ -99,14 +96,8 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
     config.validate()?;
     let log_options = config.log.options("logs/logic.log");
     let frame_config = frame_config(&config)?;
-    let logic_config = logic_config(&config);
+    let logic_config = logic_config();
     let cluster = config.node.cluster.clone();
-    let service_load_interval = Duration::from_secs(config.runtime.service_load_interval_seconds);
-    let metrics_interval = Duration::from_secs(config.runtime.metrics_interval_seconds);
-    let shutdown_timeout = Duration::from_secs(config.runtime.shutdown_drain_seconds);
-    let rpc_timeout = Duration::from_millis(config.runtime.rpc_timeout_ms);
-    let mongo_database = config.storage.mongo_database.clone();
-    let player_collection = config.storage.player_collection.clone();
     let instance_id = config.node.instance_id;
     let log_guard = xlog::init_global(log_options)?;
 
@@ -120,16 +111,12 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
         let redis = handle
             .redis()
             .expect("Logic FrameConfig always enables Redis");
+        let collections = xkk_persist::Collections::new(mongo)?;
         let application_redis = redis.clone();
         let login_metrics = Arc::new(LoginMetrics::default());
         let runtime = LogicRuntime::new(
             logic_config,
-            player::persistence(
-                mongo,
-                mongo_database,
-                player_collection,
-                login_metrics.clone(),
-            ),
+            player::persistence(collections.players(), login_metrics.clone()),
         );
         let online_count = Arc::new(AtomicI32::new(0));
         player::register_handlers(
@@ -139,7 +126,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
             runtime.clone(),
             instance_id,
             online_count.clone(),
-            rpc_timeout,
+            RPC_CALL_TIMEOUT,
             login_metrics.clone(),
         )?;
         let frame = prepared
@@ -147,9 +134,9 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
                 cluster,
                 instance_id,
                 redis: application_redis,
-                service_load_interval,
-                metrics_interval,
-                shutdown_timeout,
+                service_load_interval: SERVICE_LOAD_PUBLISH_INTERVAL,
+                metrics_interval: METRICS_REPORT_INTERVAL,
+                shutdown_timeout: SHUTDOWN_DRAIN_TIMEOUT,
                 logic_config,
                 runtime,
                 online_count,
@@ -316,6 +303,12 @@ fn spawn_metrics(
     }
     Some(tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
+        let mut last_rpc_pending_rejected = 0;
+        let mut last_write_queue_rejected = 0;
+        let mut last_rejected_calls = 0;
+        let mut last_rejected_kib = 0;
+        let mut last_rejected_gid = 0;
+        let mut last_rejected_dirty = 0;
         ticker.tick().await;
         loop {
             ticker.tick().await;
@@ -323,6 +316,67 @@ fn spawn_metrics(
             let frame_stats = frame.stats();
             let logic_stats = runtime.stats();
             let login = login_metrics.snapshot();
+            let write_queue_rejected = frame_stats.sessions.outbound_rejected_full
+                + frame_stats
+                    .listeners
+                    .iter()
+                    .map(|listener| listener.outbound_rejected_full)
+                    .sum::<u64>();
+            if frame_stats.rpc.pending_rejected > last_rpc_pending_rejected {
+                tracing::error!(
+                    rejected = frame_stats.rpc.pending_rejected - last_rpc_pending_rejected,
+                    total_rejected = frame_stats.rpc.pending_rejected,
+                    limit = RPC_PENDING_CAPACITY,
+                    "Logic RPC pending hard limit exceeded"
+                );
+                last_rpc_pending_rejected = frame_stats.rpc.pending_rejected;
+            }
+            if write_queue_rejected > last_write_queue_rejected {
+                tracing::error!(
+                    rejected = write_queue_rejected - last_write_queue_rejected,
+                    total_rejected = write_queue_rejected,
+                    limit = SERVICE_WRITE_QUEUE_CAPACITY,
+                    "Logic write queue hard limit exceeded"
+                );
+                last_write_queue_rejected = write_queue_rejected;
+            }
+            if logic_stats.rejected_calls > last_rejected_calls {
+                tracing::error!(
+                    rejected = logic_stats.rejected_calls - last_rejected_calls,
+                    total_rejected = logic_stats.rejected_calls,
+                    limit = LogicConfig::HARD_LIMITS.max_inflight_calls,
+                    "Logic inflight call hard limit exceeded"
+                );
+                last_rejected_calls = logic_stats.rejected_calls;
+            }
+            if logic_stats.rejected_kib > last_rejected_kib {
+                tracing::error!(
+                    rejected = logic_stats.rejected_kib - last_rejected_kib,
+                    total_rejected = logic_stats.rejected_kib,
+                    limit_kib = LogicConfig::HARD_LIMITS.max_inflight_kib,
+                    "Logic inflight payload hard limit exceeded"
+                );
+                last_rejected_kib = logic_stats.rejected_kib;
+            }
+            if logic_stats.rejected_gid > last_rejected_gid {
+                tracing::error!(
+                    rejected = logic_stats.rejected_gid - last_rejected_gid,
+                    total_rejected = logic_stats.rejected_gid,
+                    call_limit = LogicConfig::HARD_LIMITS.max_calls_per_gid,
+                    kib_limit = LogicConfig::HARD_LIMITS.max_kib_per_gid,
+                    "Logic per-player mailbox hard limit exceeded"
+                );
+                last_rejected_gid = logic_stats.rejected_gid;
+            }
+            if logic_stats.rejected_dirty > last_rejected_dirty {
+                tracing::error!(
+                    rejected = logic_stats.rejected_dirty - last_rejected_dirty,
+                    total_rejected = logic_stats.rejected_dirty,
+                    limit = LogicConfig::HARD_LIMITS.max_dirty_players,
+                    "Logic dirty player hard limit exceeded"
+                );
+                last_rejected_dirty = logic_stats.rejected_dirty;
+            }
             tracing::info!(
                 online_players = online,
                 frame_state = ?frame_stats.state,
@@ -374,18 +428,23 @@ mod config_tests {
 
     #[test]
     fn yaml_maps_to_logic_and_frame_capacity() {
-        let config = Config::parse(include_str!("../../../config/logic.yaml")).unwrap();
-        let logic = logic_config(&config);
+        let config = Config::parse(
+            include_str!("../../../config/common.yaml"),
+            include_str!("../../../config/logic.yaml"),
+            include_str!("../../../config/version.json"),
+        )
+        .unwrap();
+        let logic = logic_config();
         let frame = frame_config(&config).unwrap();
 
         assert_eq!(logic.max_calls_per_gid, 64);
         assert_eq!(logic.shards, 128);
-        assert_eq!(config.storage.mongo_database, "xkk");
-        assert_eq!(config.storage.player_collection, "players");
-        assert_eq!(config.runtime.rpc_timeout_ms, 3000);
-        assert_eq!(config.runtime.service_load_interval_seconds, 3);
-        assert_eq!(frame.rpc.pending_capacity(), 100_000);
-        assert_eq!(frame.service_client_transport.write_queue_capacity, 1024);
+        assert_eq!(config.version.conf, 0);
+        assert_eq!(frame.rpc.pending_capacity(), RPC_PENDING_CAPACITY);
+        assert_eq!(
+            frame.service_client_transport.write_queue_capacity,
+            SERVICE_WRITE_QUEUE_CAPACITY
+        );
         assert!(frame.service_server.is_some());
         assert_eq!(frame.node.meta_data().get("protocol").unwrap(), "ss");
     }

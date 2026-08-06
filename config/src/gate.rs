@@ -2,20 +2,32 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::{GateNode, Infrastructure, LogSettings, Result, Security, invalid, load, parse};
+use crate::{
+    GateNode, Infrastructure, LogSettings, Result, Security, ServiceVersion, invalid, load_service,
+    log::LogOverride,
+    parse_service,
+    shared::{CommonConfig, GateNodeConfig},
+};
 
 const SERVICE: &str = "Gate";
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct GateConfig {
     pub node: GateNode,
     pub infrastructure: Infrastructure,
     pub listeners: GateListeners,
-    pub capacity: GateCapacity,
-    pub runtime: GateRuntime,
     pub security: Security,
     pub log: LogSettings,
+    pub version: ServiceVersion,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GateRoleConfig {
+    node: GateNodeConfig,
+    listeners: GateListeners,
+    #[serde(default)]
+    log: LogOverride,
 }
 
 #[derive(Debug, Deserialize)]
@@ -35,6 +47,35 @@ impl GateListeners {
             GateTransport::Kcp => self.kcp_port,
             GateTransport::Websocket => self.websocket_port,
         }
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.primary_port().is_none() {
+            return Err(invalid(
+                SERVICE,
+                "listeners.primary_transport must be enabled",
+            ));
+        }
+        if [self.tcp_port, self.kcp_port, self.websocket_port]
+            .into_iter()
+            .flatten()
+            .any(|port| port == 0)
+        {
+            return Err(invalid(SERVICE, "listener ports must be positive"));
+        }
+        if self.tcp_port.is_some() && self.tcp_port == self.websocket_port {
+            return Err(invalid(
+                SERVICE,
+                "TCP and WebSocket cannot share one TCP port",
+            ));
+        }
+        if !self.websocket_path.starts_with('/') {
+            return Err(invalid(
+                SERVICE,
+                "listeners.websocket_path must start with '/'",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -56,44 +97,31 @@ impl GateTransport {
     }
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GateCapacity {
-    pub rpc_pending: usize,
-    pub write_queue: usize,
-    pub max_external_handshakes: usize,
-    pub max_external_connections: usize,
-    pub client_mailbox: usize,
-    pub shutdown_cleanup_concurrency: usize,
-    pub outbox_messages: usize,
-    pub client_request_window_count: usize,
-    pub client_burst_count: usize,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GateRuntime {
-    pub shutdown_drain_seconds: u64,
-    pub service_load_interval_seconds: u64,
-    pub metrics_interval_seconds: u64,
-    pub rpc_timeout_ms: u64,
-    pub resume_seconds: u64,
-    pub reconnect_total: usize,
-    pub reconnect_window_seconds: u64,
-    pub reconnect_window_count: usize,
-    pub client_request_window_ms: u64,
-    pub client_burst_window_ms: u64,
-}
-
 impl GateConfig {
     pub fn load(path: impl Into<PathBuf>) -> Result<Self> {
-        let config: Self = load(path)?;
-        config.validate()?;
-        Ok(config)
+        let (common, role, version) = load_service(path)?;
+        Self::compose(common, role, version)
     }
 
-    pub fn parse(yaml: &str) -> Result<Self> {
-        let config: Self = parse(yaml)?;
+    pub fn parse(common_yaml: &str, role_yaml: &str, version_json: &str) -> Result<Self> {
+        let (common, role, version) = parse_service(common_yaml, role_yaml, version_json)?;
+        Self::compose(common, role, version)
+    }
+
+    fn compose(
+        common: CommonConfig,
+        role: GateRoleConfig,
+        version: ServiceVersion,
+    ) -> Result<Self> {
+        common.validate(SERVICE)?;
+        let config = Self {
+            node: role.node.compose(common.cluster.clone()),
+            infrastructure: common.infrastructure,
+            listeners: role.listeners,
+            security: common.security,
+            log: common.log.apply(role.log),
+            version,
+        };
         config.validate()?;
         Ok(config)
     }
@@ -101,76 +129,8 @@ impl GateConfig {
     pub fn validate(&self) -> Result<()> {
         self.node.validate(SERVICE)?;
         self.infrastructure.validate(SERVICE)?;
+        self.listeners.validate()?;
         self.security.validate(SERVICE)?;
-        self.log.validate(SERVICE)?;
-
-        if self.listeners.primary_port().is_none() {
-            return Err(invalid(
-                SERVICE,
-                "listeners.primary_transport must be enabled",
-            ));
-        }
-        if [
-            self.listeners.tcp_port,
-            self.listeners.kcp_port,
-            self.listeners.websocket_port,
-        ]
-        .into_iter()
-        .flatten()
-        .any(|port| port == 0)
-        {
-            return Err(invalid(SERVICE, "listener ports must be positive"));
-        }
-        if self.listeners.tcp_port.is_some()
-            && self.listeners.tcp_port == self.listeners.websocket_port
-        {
-            return Err(invalid(
-                SERVICE,
-                "TCP and WebSocket cannot share one TCP port",
-            ));
-        }
-        if !self.listeners.websocket_path.starts_with('/') {
-            return Err(invalid(
-                SERVICE,
-                "listeners.websocket_path must start with '/'",
-            ));
-        }
-        if self.capacity.rpc_pending == 0
-            || self.capacity.write_queue == 0
-            || self.capacity.max_external_handshakes == 0
-            || self.capacity.max_external_connections == 0
-            || self.capacity.client_mailbox == 0
-            || self.capacity.shutdown_cleanup_concurrency == 0
-            || self.capacity.outbox_messages == 0
-            || self.capacity.client_request_window_count == 0
-            || self.capacity.client_burst_count == 0
-        {
-            return Err(invalid(SERVICE, "capacity values must be positive"));
-        }
-        if self.runtime.shutdown_drain_seconds == 0
-            || self.runtime.service_load_interval_seconds == 0
-            || self.runtime.rpc_timeout_ms == 0
-            || self.runtime.resume_seconds == 0
-            || self.runtime.reconnect_total == 0
-            || self.runtime.reconnect_window_seconds == 0
-            || self.runtime.reconnect_window_count == 0
-            || self.runtime.client_request_window_ms == 0
-            || self.runtime.client_burst_window_ms == 0
-        {
-            return Err(invalid(SERVICE, "runtime windows must be positive"));
-        }
-        if self.capacity.client_burst_count > self.capacity.client_request_window_count {
-            return Err(invalid(
-                SERVICE,
-                "capacity.client_burst_count cannot exceed the long-window limit",
-            ));
-        }
-        if self.runtime.reconnect_window_count > self.runtime.reconnect_total {
-            return Err(invalid(
-                SERVICE,
-                "runtime.reconnect_window_count cannot exceed reconnect_total",
-            ));
-        }
-        Ok(())
+        self.log.validate(SERVICE)
     }
 }

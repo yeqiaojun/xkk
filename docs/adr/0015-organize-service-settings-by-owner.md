@@ -1,0 +1,3 @@
+# Organize service settings by owner
+
+YAML is reserved for values that genuinely vary by deployment: cluster and instance identity, published/listening endpoints, infrastructure DSNs, secrets, and typed log settings. Stable retained-work budgets, protocol and business limits, windows, TTLs, timeouts, and background-task periods are commented hard constants in the module that enforces them. Reaching a hard limit rejects or drops work and emits an error log with the applicable limit. This avoids generic top-level `runtime` and `capacity` sections and prevents accidental per-instance policy drift. The typed log override remains the only common/role overlap, and unrestricted deep merge is rejected.

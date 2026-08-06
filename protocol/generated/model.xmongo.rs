@@ -151,9 +151,56 @@ impl ::xmongo::BsonPathGetter for PlayerData {
 }
 
 #[inline]
-fn __xmongo_to_bson_gamer_mail_data(value: &GamerMailData) -> ::xmongo::Result<::xmongo::mongodb::bson::Bson> {
+fn __xmongo_to_bson_public_player_data(value: &PublicPlayerData) -> ::xmongo::Result<::xmongo::mongodb::bson::Bson> {
     let mut doc = ::xmongo::mongodb::bson::Document::new();
     doc.insert("_id", ::xmongo::mongodb::bson::Bson::Int64(value.gid));
+    if let Some(value) = value.mail.as_ref() {
+        doc.insert("mail", __xmongo_to_bson_mail_data(value)?);
+    }
+    Ok(::xmongo::mongodb::bson::Bson::Document(doc))
+}
+
+#[inline]
+fn __xmongo_from_bson_public_player_data(value: &::xmongo::mongodb::bson::Bson) -> ::xmongo::Result<PublicPlayerData> {
+    let doc = ::xmongo::bson_document(value, "PublicPlayerData")?;
+    let mut out = PublicPlayerData::default();
+    if let Some(value) = doc.get("_id") {
+        out.gid = ::xmongo::bson_i64(value, "_id")?;
+    }
+    if let Some(value) = doc.get("mail") {
+        out.mail = Some(__xmongo_from_bson_mail_data(value)?);
+    }
+    Ok(out)
+}
+
+impl ::xmongo::BsonPathGetter for PublicPlayerData {
+    fn bson_path_value(&self, path: &str) -> ::xmongo::Result<::xmongo::BsonPathValue> {
+        match ::xmongo::split_bson_path(path) {
+            ("_id", None) => {
+                Ok(::xmongo::BsonPathValue::Set(::xmongo::mongodb::bson::Bson::Int64(self.gid)))
+            }
+            ("mail", None) => {
+                let Some(value) = self.mail.as_ref() else {
+                    return Ok(::xmongo::BsonPathValue::Unset);
+                };
+                Ok(::xmongo::BsonPathValue::Set(__xmongo_to_bson_mail_data(value)?))
+            }
+            _ => Err(::xmongo::Error::InvalidBsonPath(path.to_string())),
+        }
+    }
+
+    fn bson_value(&self) -> ::xmongo::Result<::xmongo::mongodb::bson::Bson> {
+        __xmongo_to_bson_public_player_data(self)
+    }
+
+    fn from_bson_value(value: &::xmongo::mongodb::bson::Bson) -> ::xmongo::Result<Self> {
+        __xmongo_from_bson_public_player_data(value)
+    }
+}
+
+#[inline]
+fn __xmongo_to_bson_mail_data(value: &MailData) -> ::xmongo::Result<::xmongo::mongodb::bson::Bson> {
+    let mut doc = ::xmongo::mongodb::bson::Document::new();
     doc.insert("next", ::xmongo::mongodb::bson::Bson::Int64(value.next_mail_id));
     if !value.mails.is_empty() {
         let mut array = Vec::with_capacity(value.mails.len());
@@ -166,12 +213,9 @@ fn __xmongo_to_bson_gamer_mail_data(value: &GamerMailData) -> ::xmongo::Result<:
 }
 
 #[inline]
-fn __xmongo_from_bson_gamer_mail_data(value: &::xmongo::mongodb::bson::Bson) -> ::xmongo::Result<GamerMailData> {
-    let doc = ::xmongo::bson_document(value, "GamerMailData")?;
-    let mut out = GamerMailData::default();
-    if let Some(value) = doc.get("_id") {
-        out.gid = ::xmongo::bson_i64(value, "_id")?;
-    }
+fn __xmongo_from_bson_mail_data(value: &::xmongo::mongodb::bson::Bson) -> ::xmongo::Result<MailData> {
+    let doc = ::xmongo::bson_document(value, "MailData")?;
+    let mut out = MailData::default();
     if let Some(value) = doc.get("next") {
         out.next_mail_id = ::xmongo::bson_i64(value, "next")?;
     }
@@ -185,102 +229,12 @@ fn __xmongo_from_bson_gamer_mail_data(value: &::xmongo::mongodb::bson::Bson) -> 
     Ok(out)
 }
 
-impl ::xmongo::BsonPathGetter for GamerMailData {
-    fn bson_path_value(&self, path: &str) -> ::xmongo::Result<::xmongo::BsonPathValue> {
-        match ::xmongo::split_bson_path(path) {
-            ("_id", None) => {
-                Ok(::xmongo::BsonPathValue::Set(::xmongo::mongodb::bson::Bson::Int64(self.gid)))
-            }
-            ("next", None) => {
-                Ok(::xmongo::BsonPathValue::Set(::xmongo::mongodb::bson::Bson::Int64(self.next_mail_id)))
-            }
-            ("mails", None) => {
-                let mut array = Vec::with_capacity(self.mails.len());
-                for item in &self.mails {
-                    array.push(__xmongo_to_bson_mail(item)?);
-                }
-                Ok(::xmongo::BsonPathValue::Set(::xmongo::mongodb::bson::Bson::Array(array)))
-            }
-            _ => Err(::xmongo::Error::InvalidBsonPath(path.to_string())),
-        }
-    }
-
+impl ::xmongo::BsonPathGetter for MailData {
     fn bson_value(&self) -> ::xmongo::Result<::xmongo::mongodb::bson::Bson> {
-        __xmongo_to_bson_gamer_mail_data(self)
+        __xmongo_to_bson_mail_data(self)
     }
 
     fn from_bson_value(value: &::xmongo::mongodb::bson::Bson) -> ::xmongo::Result<Self> {
-        __xmongo_from_bson_gamer_mail_data(value)
-    }
-}
-
-#[inline]
-fn __xmongo_to_bson_config_manifest_data(value: &ConfigManifestData) -> ::xmongo::Result<::xmongo::mongodb::bson::Bson> {
-    let mut doc = ::xmongo::mongodb::bson::Document::new();
-    doc.insert("_id", ::xmongo::mongodb::bson::Bson::String(value.version.clone()));
-    doc.insert("key", ::xmongo::mongodb::bson::Bson::String(value.key.clone()));
-    doc.insert("url", ::xmongo::mongodb::bson::Bson::String(value.base_url.clone()));
-    if !value.files.is_empty() {
-        let mut array = Vec::with_capacity(value.files.len());
-        for item in &value.files {
-            array.push(__xmongo_to_bson_config_file(item)?);
-        }
-        doc.insert("files", ::xmongo::mongodb::bson::Bson::Array(array));
-    }
-    Ok(::xmongo::mongodb::bson::Bson::Document(doc))
-}
-
-#[inline]
-fn __xmongo_from_bson_config_manifest_data(value: &::xmongo::mongodb::bson::Bson) -> ::xmongo::Result<ConfigManifestData> {
-    let doc = ::xmongo::bson_document(value, "ConfigManifestData")?;
-    let mut out = ConfigManifestData::default();
-    if let Some(value) = doc.get("_id") {
-        out.version = ::xmongo::bson_string(value, "_id")?.to_string();
-    }
-    if let Some(value) = doc.get("key") {
-        out.key = ::xmongo::bson_string(value, "key")?.to_string();
-    }
-    if let Some(value) = doc.get("url") {
-        out.base_url = ::xmongo::bson_string(value, "url")?.to_string();
-    }
-    if let Some(value) = doc.get("files") {
-        let array = ::xmongo::bson_array(value, "files")?;
-        out.files.reserve(array.len());
-        for item in array {
-            out.files.push(__xmongo_from_bson_config_file(item)?);
-        }
-    }
-    Ok(out)
-}
-
-impl ::xmongo::BsonPathGetter for ConfigManifestData {
-    fn bson_path_value(&self, path: &str) -> ::xmongo::Result<::xmongo::BsonPathValue> {
-        match ::xmongo::split_bson_path(path) {
-            ("_id", None) => {
-                Ok(::xmongo::BsonPathValue::Set(::xmongo::mongodb::bson::Bson::String(self.version.clone())))
-            }
-            ("key", None) => {
-                Ok(::xmongo::BsonPathValue::Set(::xmongo::mongodb::bson::Bson::String(self.key.clone())))
-            }
-            ("url", None) => {
-                Ok(::xmongo::BsonPathValue::Set(::xmongo::mongodb::bson::Bson::String(self.base_url.clone())))
-            }
-            ("files", None) => {
-                let mut array = Vec::with_capacity(self.files.len());
-                for item in &self.files {
-                    array.push(__xmongo_to_bson_config_file(item)?);
-                }
-                Ok(::xmongo::BsonPathValue::Set(::xmongo::mongodb::bson::Bson::Array(array)))
-            }
-            _ => Err(::xmongo::Error::InvalidBsonPath(path.to_string())),
-        }
-    }
-
-    fn bson_value(&self) -> ::xmongo::Result<::xmongo::mongodb::bson::Bson> {
-        __xmongo_to_bson_config_manifest_data(self)
-    }
-
-    fn from_bson_value(value: &::xmongo::mongodb::bson::Bson) -> ::xmongo::Result<Self> {
-        __xmongo_from_bson_config_manifest_data(value)
+        __xmongo_from_bson_mail_data(value)
     }
 }

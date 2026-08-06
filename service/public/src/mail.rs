@@ -2,89 +2,66 @@ use std::{collections::HashSet, time::Duration};
 
 use xframe::{
     FrameHandle, ServiceType,
-    xmongo::{self, mongodb::bson::Document},
     xrpc::{RpcContext, RpcManager},
 };
 use xkk_cache::load_online;
 use xkk_common::unix_seconds;
-use xkk_persist::{load_model, save_model};
 use xkk_protocol::{code, error_status, ok_status, pb};
+
+use crate::players::{CacheError, Players};
 
 const MAIL_READ: i32 = 1;
 const MAIL_CLAIMED: i32 = 2;
 const DEFAULT_MAIL_LIFETIME: i64 = 30 * 24 * 60 * 60;
 const MAX_REQUEST_MAILS: usize = 100;
+// Mail retention and the internal RPC timeout are product conventions. They
+// are deliberately changed through code review.
+const MAX_MAILS_PER_PLAYER: usize = 200;
+const RPC_CALL_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone)]
 pub(crate) struct MailService {
     frame: FrameHandle,
     redis: xframe::xredis::Client,
-    collection: xmongo::Collection<Document>,
-    max_mails: usize,
-    rpc_timeout: Duration,
-    lock_ttl: Duration,
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct MailSettings {
-    pub max_mails: usize,
-    pub rpc_timeout: Duration,
-    pub lock_ttl: Duration,
+    players: Players,
 }
 
 impl MailService {
-    pub fn new(
-        frame: FrameHandle,
-        redis: xframe::xredis::Client,
-        collection: xmongo::Collection<Document>,
-        settings: MailSettings,
-    ) -> Self {
-        assert!(settings.max_mails > 0, "Public max mails must be positive");
-        assert!(
-            !settings.rpc_timeout.is_zero(),
-            "Public RPC timeout must be positive"
-        );
-        assert!(
-            !settings.lock_ttl.is_zero(),
-            "Public mail lock TTL must be positive"
-        );
+    pub fn new(frame: FrameHandle, redis: xframe::xredis::Client, players: Players) -> Self {
         Self {
             frame,
             redis,
-            collection,
-            max_mails: settings.max_mails,
-            rpc_timeout: settings.rpc_timeout,
-            lock_ttl: settings.lock_ttl,
+            players,
         }
     }
 
     pub fn register_handlers(&self, rpc: &RpcManager) -> xframe::xrpc::Result<()> {
         let list = self.clone();
-        rpc.register_typed::<pb::MailListReq, _, _>(move |context, request| {
+        rpc.register::<pb::MailListReq, _, _>(move |context, request| {
             let service = list.clone();
             async move { Ok(service.list(context, request).await) }
         })?;
 
         let read = self.clone();
-        rpc.register_typed::<pb::MailReadReq, _, _>(move |context, request| {
+        rpc.register::<pb::MailReadReq, _, _>(move |context, request| {
             let service = read.clone();
             async move { Ok(service.read(context, request).await) }
         })?;
 
         let delete = self.clone();
-        rpc.register_typed::<pb::MailDeleteReq, _, _>(move |context, request| {
+        rpc.register::<pb::MailDeleteReq, _, _>(move |context, request| {
             let service = delete.clone();
             async move { Ok(service.delete(context, request).await) }
         })?;
 
         let claim = self.clone();
-        rpc.register_typed::<pb::MailClaimReq, _, _>(move |context, request| {
+        rpc.register::<pb::MailClaimReq, _, _>(move |context, request| {
             let service = claim.clone();
             async move { Ok(service.claim(context, request).await) }
         })?;
 
         let send = self.clone();
-        rpc.register_typed::<pb::SendMailReq, _, _>(move |_context, request| {
+        rpc.register::<pb::SendMailReq, _, _>(move |_context, request| {
             let service = send.clone();
             async move { Ok(service.send_mail(request).await) }
         })?;
@@ -95,26 +72,26 @@ impl MailService {
         let Some(gid) = player_gid(&context) else {
             return mail_list_error(code::INVALID_ARGUMENT, "missing player route");
         };
-        let lock = match self.lock(gid).await {
-            Ok(lock) => lock,
-            Err(status) => return mail_list_status(status),
-        };
-        let result = self.load(gid).await;
-        self.release(lock, gid).await;
-        let data = match result {
-            Ok(data) => data,
-            Err(status) => return mail_list_status(status),
-        };
-        let now = unix_seconds();
-        let mut mails = data
-            .mails
-            .into_iter()
-            .filter(|mail| mail.end_time == 0 || mail.end_time > now)
-            .collect::<Vec<_>>();
-        mails.sort_unstable_by_key(|mail| mail.mail_id);
-        pb::MailListRsp {
-            status: Some(ok_status()),
-            mails,
+        let result = self
+            .players
+            .read(gid, |data| {
+                let now = unix_seconds();
+                let mut mails = mail(data)
+                    .mails
+                    .iter()
+                    .filter(|mail| mail.end_time == 0 || mail.end_time > now)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                mails.sort_unstable_by_key(|mail| mail.mail_id);
+                mails
+            })
+            .await;
+        match result {
+            Ok(mails) => pb::MailListRsp {
+                status: Some(ok_status()),
+                mails,
+            },
+            Err(error) => mail_list_status(cache_status(gid, "list", error)),
         }
     }
 
@@ -125,33 +102,27 @@ impl MailService {
         let Some(mail_ids) = valid_mail_ids(request.mail_ids) else {
             return mail_read_error(code::INVALID_ARGUMENT, "invalid mail ids");
         };
-        let lock = match self.lock(gid).await {
-            Ok(lock) => lock,
-            Err(status) => return mail_read_status(status),
-        };
-        let result = async {
-            let mut data = self.load(gid).await?;
-            let requested = mail_ids.iter().copied().collect::<HashSet<_>>();
-            let mut changed = Vec::new();
-            for mail in &mut data.mails {
-                if requested.contains(&mail.mail_id) && mail.state < MAIL_READ {
-                    mail.state = MAIL_READ;
-                    changed.push(mail.mail_id);
+        let result = self
+            .players
+            .update(gid, |data| {
+                let requested = mail_ids.iter().copied().collect::<HashSet<_>>();
+                let mut changed = Vec::new();
+                for mail in &mut mail_mut(data).mails {
+                    if requested.contains(&mail.mail_id) && mail.state < MAIL_READ {
+                        mail.state = MAIL_READ;
+                        changed.push(mail.mail_id);
+                    }
                 }
-            }
-            if !changed.is_empty() {
-                self.save(&data).await?;
-            }
-            Ok::<_, pb::Status>(changed)
-        }
-        .await;
-        self.release(lock, gid).await;
+                let dirty = !changed.is_empty();
+                (changed, dirty)
+            })
+            .await;
         match result {
             Ok(mail_ids) => pb::MailReadRsp {
                 status: Some(ok_status()),
                 mail_ids,
             },
-            Err(status) => mail_read_status(status),
+            Err(error) => mail_read_status(cache_status(gid, "read", error)),
         }
     }
 
@@ -162,35 +133,29 @@ impl MailService {
         let Some(mail_ids) = valid_mail_ids(request.mail_ids) else {
             return mail_delete_error(code::INVALID_ARGUMENT, "invalid mail ids");
         };
-        let lock = match self.lock(gid).await {
-            Ok(lock) => lock,
-            Err(status) => return mail_delete_status(status),
-        };
-        let result = async {
-            let mut data = self.load(gid).await?;
-            let requested = mail_ids.iter().copied().collect::<HashSet<_>>();
-            let mut removed = Vec::new();
-            data.mails.retain(|mail| {
-                if requested.contains(&mail.mail_id) {
-                    removed.push(mail.mail_id);
-                    false
-                } else {
-                    true
-                }
-            });
-            if !removed.is_empty() {
-                self.save(&data).await?;
-            }
-            Ok::<_, pb::Status>(removed)
-        }
-        .await;
-        self.release(lock, gid).await;
+        let result = self
+            .players
+            .update(gid, |data| {
+                let requested = mail_ids.iter().copied().collect::<HashSet<_>>();
+                let mut removed = Vec::new();
+                mail_mut(data).mails.retain(|mail| {
+                    if requested.contains(&mail.mail_id) {
+                        removed.push(mail.mail_id);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                let dirty = !removed.is_empty();
+                (removed, dirty)
+            })
+            .await;
         match result {
             Ok(mail_ids) => pb::MailDeleteRsp {
                 status: Some(ok_status()),
                 mail_ids,
             },
-            Err(status) => mail_delete_status(status),
+            Err(error) => mail_delete_status(cache_status(gid, "delete", error)),
         }
     }
 
@@ -201,15 +166,14 @@ impl MailService {
         let Some(mail_ids) = valid_mail_ids(request.mail_ids) else {
             return mail_claim_error(code::INVALID_ARGUMENT, "invalid mail ids");
         };
-        let lock = match self.lock(gid).await {
-            Ok(lock) => lock,
-            Err(status) => return mail_claim_status(status),
-        };
-        let result = self.claim_and_save(gid, &mail_ids).await;
-        self.release(lock, gid).await;
+        let result = self
+            .players
+            .update(gid, |data| claim_mails(mail_mut(data), &mail_ids))
+            .await;
         let attachments = match result {
-            Ok(attachments) => attachments,
-            Err(status) => return mail_claim_status(status),
+            Ok(Ok(attachments)) => attachments,
+            Ok(Err(status)) => return mail_claim_status(status),
+            Err(error) => return mail_claim_status(cache_status(gid, "claim", error)),
         };
         if attachments.is_empty() {
             return pb::MailClaimRsp {
@@ -234,7 +198,7 @@ impl MailService {
         };
         let response: pb::AddItemsRsp = match self
             .frame
-            .call_player_to_typed(
+            .call_player_to(
                 ServiceType::Logic,
                 online.logic_id,
                 gid,
@@ -245,7 +209,7 @@ impl MailService {
                     items: attachments,
                     reason: format!("mail_claim:{mail_ids:?}"),
                 },
-                self.rpc_timeout,
+                RPC_CALL_TIMEOUT,
             )
             .await
         {
@@ -274,41 +238,15 @@ impl MailService {
         }
     }
 
-    async fn claim_and_save(
-        &self,
-        gid: i64,
-        mail_ids: &[i64],
-    ) -> Result<Vec<pb::Item>, pb::Status> {
-        let mut data = self.load(gid).await?;
-        let now = unix_seconds();
-        let mut attachments = Vec::new();
-        for mail_id in mail_ids {
-            let Some(mail) = data.mails.iter().find(|mail| mail.mail_id == *mail_id) else {
-                return Err(error_status(code::NOT_FOUND, "mail not found"));
-            };
-            if (mail.end_time != 0 && mail.end_time <= now) || mail.state >= MAIL_CLAIMED {
-                return Err(error_status(code::CONFLICT, "mail cannot be claimed"));
-            }
-            attachments.extend(mail.attachments.clone());
-        }
-        for mail in &mut data.mails {
-            if mail_ids.contains(&mail.mail_id) {
-                mail.state = MAIL_CLAIMED;
-            }
-        }
-        self.save(&data).await?;
-        Ok(attachments)
-    }
-
     async fn send_mail(&self, request: pb::SendMailReq) -> pb::SendMailRsp {
-        let Some(mut mail) = request.mail else {
+        let Some(mut message) = request.mail else {
             return send_mail_error(code::INVALID_ARGUMENT, "mail is required");
         };
         if request.gid <= 0
-            || mail.title.is_empty()
-            || mail.title.len() > 128
-            || mail.content.len() > 4096
-            || mail
+            || message.title.is_empty()
+            || message.title.len() > 128
+            || message.content.len() > 4096
+            || message
                 .attachments
                 .iter()
                 .any(|item| item.item_id <= 0 || item.count <= 0)
@@ -316,54 +254,65 @@ impl MailService {
             return send_mail_error(code::INVALID_ARGUMENT, "invalid mail request");
         }
         let gid = request.gid;
-        let lock = match self.lock(gid).await {
-            Ok(lock) => lock,
-            Err(status) => return send_mail_status(status),
+        let result = self
+            .players
+            .update(gid, |data| {
+                let now = unix_seconds();
+                let data = mail_mut(data);
+                let mail_id = data.next_mail_id.max(1);
+                let Some(next_mail_id) = mail_id.checked_add(1) else {
+                    return (
+                        Err(error_status(code::CONFLICT, "mail id exhausted")),
+                        false,
+                    );
+                };
+                message.mail_id = mail_id;
+                message.send_time = if message.send_time == 0 {
+                    now
+                } else {
+                    message.send_time
+                };
+                message.end_time = if message.end_time == 0 {
+                    message.send_time + DEFAULT_MAIL_LIFETIME
+                } else {
+                    message.end_time
+                };
+                if message.end_time <= now {
+                    return (
+                        Err(error_status(
+                            code::INVALID_ARGUMENT,
+                            "mail is already expired",
+                        )),
+                        false,
+                    );
+                }
+
+                data.next_mail_id = next_mail_id;
+                message.state = 0;
+                data.mails.push(message.clone());
+                data.mails.sort_unstable_by_key(|mail| mail.mail_id);
+                if data.mails.len() > MAX_MAILS_PER_PLAYER {
+                    let remove = data.mails.len() - MAX_MAILS_PER_PLAYER;
+                    tracing::error!(
+                        gid,
+                        retained = MAX_MAILS_PER_PLAYER,
+                        removed = remove,
+                        "Public mail retention hard limit exceeded"
+                    );
+                    data.mails.drain(..remove);
+                }
+                (Ok(message.clone()), true)
+            })
+            .await;
+        let message = match result {
+            Ok(Ok(message)) => message,
+            Ok(Err(status)) => return send_mail_status(status),
+            Err(error) => return send_mail_status(cache_status(gid, "send", error)),
         };
-        let result = async {
-            let mut data = self.load(gid).await?;
-            let mail_id = data.next_mail_id.max(1);
-            data.next_mail_id = mail_id
-                .checked_add(1)
-                .ok_or_else(|| error_status(code::CONFLICT, "mail id exhausted"))?;
-            let now = unix_seconds();
-            mail.mail_id = mail_id;
-            mail.send_time = if mail.send_time == 0 {
-                now
-            } else {
-                mail.send_time
-            };
-            mail.end_time = if mail.end_time == 0 {
-                mail.send_time + DEFAULT_MAIL_LIFETIME
-            } else {
-                mail.end_time
-            };
-            if mail.end_time <= now {
-                return Err(error_status(
-                    code::INVALID_ARGUMENT,
-                    "mail is already expired",
-                ));
-            }
-            mail.state = 0;
-            data.mails.push(mail.clone());
-            data.mails.sort_unstable_by_key(|mail| mail.mail_id);
-            if data.mails.len() > self.max_mails {
-                let remove = data.mails.len() - self.max_mails;
-                data.mails.drain(..remove);
-            }
-            self.save(&data).await?;
-            Ok::<_, pb::Status>(mail.clone())
-        }
-        .await;
-        self.release(lock, gid).await;
-        let mail = match result {
-            Ok(mail) => mail,
-            Err(status) => return send_mail_status(status),
-        };
-        self.notify_mail(gid, mail.clone()).await;
+        self.notify_mail(gid, message.clone()).await;
         pb::SendMailRsp {
             status: Some(ok_status()),
-            mail_id: mail.mail_id,
+            mail_id: message.mail_id,
         }
     }
 
@@ -376,7 +325,7 @@ impl MailService {
         }
         if let Err(error) = self
             .frame
-            .send_to_typed(
+            .send_to(
                 ServiceType::Gate,
                 online.gate_id,
                 &pb::MailPushNtf {
@@ -389,49 +338,49 @@ impl MailService {
             tracing::debug!(gid, gate_id = online.gate_id, %error, "Public mail push failed");
         }
     }
+}
 
-    async fn lock(&self, gid: i64) -> Result<xframe::xredis::RedisLock, pb::Status> {
-        match self
-            .redis
-            .try_lock(format!("xkk:mail:lock:{gid}"), self.lock_ttl)
-            .await
-        {
-            Ok(Some(lock)) => Ok(lock),
-            Ok(None) => Err(error_status(code::OVERLOADED, "mail request in progress")),
-            Err(error) => {
-                tracing::error!(gid, %error, "Public mail lock failed");
-                Err(error_status(code::INTERNAL, "mail lock failed"))
-            }
+fn claim_mails(
+    data: &mut pb::MailData,
+    mail_ids: &[i64],
+) -> (Result<Vec<pb::Item>, pb::Status>, bool) {
+    let now = unix_seconds();
+    let mut attachments = Vec::new();
+    for mail_id in mail_ids {
+        let Some(mail) = data.mails.iter().find(|mail| mail.mail_id == *mail_id) else {
+            return (Err(error_status(code::NOT_FOUND, "mail not found")), false);
+        };
+        if (mail.end_time != 0 && mail.end_time <= now) || mail.state >= MAIL_CLAIMED {
+            return (
+                Err(error_status(code::CONFLICT, "mail cannot be claimed")),
+                false,
+            );
+        }
+        attachments.extend(mail.attachments.clone());
+    }
+    for mail in &mut data.mails {
+        if mail_ids.contains(&mail.mail_id) {
+            mail.state = MAIL_CLAIMED;
         }
     }
+    (Ok(attachments), true)
+}
 
-    async fn release(&self, lock: xframe::xredis::RedisLock, gid: i64) {
-        if let Err(error) = lock.release().await {
-            tracing::warn!(gid, %error, "Public mail lock release failed");
-        }
-    }
+fn mail(data: &pb::PublicPlayerData) -> &pb::MailData {
+    data.mail
+        .as_ref()
+        .expect("persist normalizes Public player Mail data")
+}
 
-    async fn load(&self, gid: i64) -> Result<pb::GamerMailData, pb::Status> {
-        match load_model(&self.collection, gid).await {
-            Ok(Some(data)) => Ok(data),
-            Ok(None) => Ok(pb::GamerMailData {
-                gid,
-                next_mail_id: 1,
-                mails: Vec::new(),
-            }),
-            Err(error) => {
-                tracing::error!(gid, %error, "Public mail load failed");
-                Err(error_status(code::INTERNAL, "mail load failed"))
-            }
-        }
-    }
+fn mail_mut(data: &mut pb::PublicPlayerData) -> &mut pb::MailData {
+    data.mail
+        .as_mut()
+        .expect("persist normalizes Public player Mail data")
+}
 
-    async fn save(&self, data: &pb::GamerMailData) -> Result<(), pb::Status> {
-        save_model(&self.collection, data).await.map_err(|error| {
-            tracing::error!(gid = data.gid, %error, "Public mail save failed");
-            error_status(code::INTERNAL, "mail save failed")
-        })
-    }
+fn cache_status(gid: i64, operation: &'static str, error: CacheError) -> pb::Status {
+    tracing::error!(gid, operation, %error, "Public player cache operation failed");
+    error_status(code::INTERNAL, "Public player data unavailable")
 }
 
 fn player_gid(context: &RpcContext) -> Option<i64> {
@@ -482,5 +431,34 @@ mod tests {
         assert!(valid_mail_ids(vec![1, 1]).is_none());
         assert!(valid_mail_ids(vec![0]).is_none());
         assert!(valid_mail_ids(vec![1; MAX_REQUEST_MAILS + 1]).is_none());
+    }
+
+    #[test]
+    fn claim_validates_every_mail_before_mutating() {
+        let mut data = pb::MailData {
+            next_mail_id: 3,
+            mails: vec![
+                pb::Mail {
+                    mail_id: 1,
+                    attachments: vec![pb::Item {
+                        item_id: 7,
+                        count: 2,
+                        change: 0,
+                    }],
+                    ..Default::default()
+                },
+                pb::Mail {
+                    mail_id: 2,
+                    state: MAIL_CLAIMED,
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let (result, changed) = claim_mails(&mut data, &[1, 2]);
+
+        assert!(result.is_err());
+        assert!(!changed);
+        assert_eq!(data.mails[0].state, 0);
     }
 }

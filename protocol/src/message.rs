@@ -1,6 +1,4 @@
-use std::ops::RangeInclusive;
-
-use crate::{MsgId, registry};
+use crate::MsgId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MessageKind {
@@ -39,20 +37,27 @@ impl MsgId {
     }
 }
 
-pub const OUTBOX_EXCLUDED_RANGES: &[RangeInclusive<u16>] = &[1..=99, 3000..=3014];
-
 pub fn is_outbox_message(msgid: u16) -> bool {
-    !OUTBOX_EXCLUDED_RANGES
-        .iter()
-        .any(|range| range.contains(&msgid))
+    if (1..xproto::SYSTEM_MSG_ID_END as u16).contains(&msgid) {
+        return false;
+    }
+    !matches!(
+        from_u16(msgid),
+        Some(
+            MsgId::PingRsp
+                | MsgId::LoginRsp
+                | MsgId::ReconnectRsp
+                | MsgId::LogoutRsp
+                | MsgId::KickNtf
+        )
+    )
 }
 
 pub fn response_for(request: MsgId) -> Option<MsgId> {
-    registry::response_id(request)
-}
-
-pub fn request_for(response: MsgId) -> Option<MsgId> {
-    registry::request_id(response)
+    let response = xproto::global_registry()
+        .ok()?
+        .response_id(request.as_u16())?;
+    from_u16(response)
 }
 
 pub fn route_target(request: MsgId) -> Option<RouteTarget> {

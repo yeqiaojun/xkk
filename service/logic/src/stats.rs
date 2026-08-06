@@ -4,81 +4,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use xkk_common::{LatencyRecorder, LatencyStats};
 
-pub const LATENCY_BUCKETS_US: [u64; 18] = [
-    10,
-    25,
-    50,
-    100,
-    250,
-    500,
-    1_000,
-    2_500,
-    5_000,
-    10_000,
-    15_000,
-    20_000,
-    30_000,
-    50_000,
-    75_000,
-    100_000,
-    250_000,
-    u64::MAX,
-];
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct LatencyHistogram {
-    pub counts: [u64; LATENCY_BUCKETS_US.len()],
-}
-
-impl LatencyHistogram {
-    pub fn count(&self) -> u64 {
-        self.counts.iter().sum()
-    }
-
-    pub fn percentile_micros(&self, percentile: f64) -> Option<u64> {
-        let count = self.count();
-        if count == 0 {
-            return None;
-        }
-        assert!((0.0..=100.0).contains(&percentile));
-
-        let rank = ((count as f64 * percentile / 100.0).ceil() as u64).max(1);
-        let mut seen = 0;
-        for (bound, count) in LATENCY_BUCKETS_US.iter().zip(self.counts) {
-            seen += count;
-            if seen >= rank {
-                return Some(*bound);
-            }
-        }
-        unreachable!("logic latency histogram count changed while reading a snapshot")
-    }
-}
-
-pub(crate) struct AtomicHistogram {
-    counts: [AtomicU64; LATENCY_BUCKETS_US.len()],
-}
-
-impl AtomicHistogram {
-    pub(crate) fn new() -> Self {
-        Self {
-            counts: std::array::from_fn(|_| AtomicU64::new(0)),
-        }
-    }
-
-    #[inline]
-    pub(crate) fn record(&self, elapsed: Duration) {
-        let micros = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
-        let bucket = LATENCY_BUCKETS_US.partition_point(|&bound| bound < micros);
-        self.counts[bucket].fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(crate) fn snapshot(&self) -> LatencyHistogram {
-        LatencyHistogram {
-            counts: std::array::from_fn(|index| self.counts[index].load(Ordering::Relaxed)),
-        }
-    }
-}
-
 pub(crate) struct StatsInner {
     pub(crate) inflight_calls_high_water: AtomicU64,
     pub(crate) inflight_kib_high_water: AtomicU64,
@@ -101,13 +26,13 @@ pub(crate) struct StatsInner {
     pub(crate) rejected_gid: AtomicU64,
     pub(crate) rejected_dirty: AtomicU64,
     pub(crate) rejected_draining: AtomicU64,
-    pub(crate) queue_latency: AtomicHistogram,
-    pub(crate) load_latency: AtomicHistogram,
-    pub(crate) run_latency: AtomicHistogram,
-    pub(crate) preload_latency: AtomicHistogram,
-    pub(crate) save_latency: AtomicHistogram,
-    pub(crate) total_latency: AtomicHistogram,
-    pub(crate) flush_latency: AtomicHistogram,
+    pub(crate) queue_latency: LatencyRecorder,
+    pub(crate) load_latency: LatencyRecorder,
+    pub(crate) run_latency: LatencyRecorder,
+    pub(crate) preload_latency: LatencyRecorder,
+    pub(crate) save_latency: LatencyRecorder,
+    pub(crate) total_latency: LatencyRecorder,
+    pub(crate) flush_latency: LatencyRecorder,
     dirty_since: Mutex<HashMap<u64, Instant>>,
 }
 
@@ -135,13 +60,13 @@ impl StatsInner {
             rejected_gid: AtomicU64::new(0),
             rejected_dirty: AtomicU64::new(0),
             rejected_draining: AtomicU64::new(0),
-            queue_latency: AtomicHistogram::new(),
-            load_latency: AtomicHistogram::new(),
-            run_latency: AtomicHistogram::new(),
-            preload_latency: AtomicHistogram::new(),
-            save_latency: AtomicHistogram::new(),
-            total_latency: AtomicHistogram::new(),
-            flush_latency: AtomicHistogram::new(),
+            queue_latency: LatencyRecorder::default(),
+            load_latency: LatencyRecorder::default(),
+            run_latency: LatencyRecorder::default(),
+            preload_latency: LatencyRecorder::default(),
+            save_latency: LatencyRecorder::default(),
+            total_latency: LatencyRecorder::default(),
+            flush_latency: LatencyRecorder::default(),
             dirty_since: Mutex::new(HashMap::new()),
         }
     }
@@ -199,13 +124,13 @@ pub struct LogicStats {
     pub rejected_gid: u64,
     pub rejected_dirty: u64,
     pub rejected_draining: u64,
-    pub queue_latency: LatencyHistogram,
-    pub load_latency: LatencyHistogram,
-    pub run_latency: LatencyHistogram,
-    pub preload_latency: LatencyHistogram,
-    pub save_latency: LatencyHistogram,
-    pub total_latency: LatencyHistogram,
-    pub flush_latency: LatencyHistogram,
+    pub queue_latency: LatencyStats,
+    pub load_latency: LatencyStats,
+    pub run_latency: LatencyStats,
+    pub preload_latency: LatencyStats,
+    pub save_latency: LatencyStats,
+    pub total_latency: LatencyStats,
+    pub flush_latency: LatencyStats,
     pub oldest_dirty_age: Duration,
     pub cache: xlru::Stats,
 }

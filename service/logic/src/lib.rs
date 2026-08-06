@@ -10,7 +10,8 @@ pub use runtime::{
     ShutdownError,
 };
 pub use service::{Config, ServiceError, config_path, run};
-pub use stats::{LATENCY_BUCKETS_US, LatencyHistogram, LogicStats};
+pub use stats::LogicStats;
+pub use xkk_common::LatencyStats;
 
 #[cfg(test)]
 mod tests;

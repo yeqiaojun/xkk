@@ -117,21 +117,25 @@ pub struct LogicConfig {
 
 impl Default for LogicConfig {
     fn default() -> Self {
-        Self {
-            resident_capacity: 100_000,
-            ttl: Duration::from_secs(24 * 60 * 60),
-            shards: 128,
-            batch_save_count: 1_000,
-            max_dirty_players: 100_000,
-            max_inflight_calls: 100_000,
-            max_inflight_kib: 256 * 1024,
-            max_calls_per_gid: 64,
-            max_kib_per_gid: 1_024,
-        }
+        Self::HARD_LIMITS
     }
 }
 
 impl LogicConfig {
+    // One Logic process is sized to this fixed retained-work contract. Rejections are counted and
+    // emitted as error logs by the service metrics task; scale by adding Logic instances.
+    pub const HARD_LIMITS: Self = Self {
+        resident_capacity: 100_000,
+        ttl: Duration::from_secs(24 * 60 * 60),
+        shards: 128,
+        batch_save_count: 1_000,
+        max_dirty_players: 100_000,
+        max_inflight_calls: 100_000,
+        max_inflight_kib: 256 * 1024,
+        max_calls_per_gid: 64,
+        max_kib_per_gid: 1_024,
+    };
+
     fn validate(&self) {
         assert!(
             self.resident_capacity > 0,

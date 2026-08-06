@@ -1,8 +1,10 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
+
+use prost::Message;
+use prost_types::{FileDescriptorSet, compiler::CodeGeneratorRequest};
 
 const GENERATED_FILES: [&str; 5] = [
     "xkk.v1.rs",
@@ -17,9 +19,7 @@ fn main() {
     let proto_dir = manifest.join("../proto");
     let protocol_proto = proto_dir.join("xkk.proto");
     let model_proto = proto_dir.join("model.proto");
-    let tools = manifest.join("../tools");
-    let protoc = tools.join("protoc.exe");
-    let xmongo_plugin = tools.join("protoc-gen-xmongo-trait.exe");
+    let protoc = protoc_bin_vendored::protoc_bin_path().expect("locate vendored protobuf compiler");
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
 
     assert!(
@@ -27,16 +27,9 @@ fn main() {
         "missing protocol compiler: {}",
         protoc.display()
     );
-    assert!(
-        xmongo_plugin.is_file(),
-        "missing xmongo protocol plugin: {}",
-        xmongo_plugin.display()
-    );
 
     println!("cargo:rerun-if-changed={}", protocol_proto.display());
     println!("cargo:rerun-if-changed={}", model_proto.display());
-    println!("cargo:rerun-if-changed={}", protoc.display());
-    println!("cargo:rerun-if-changed={}", xmongo_plugin.display());
     println!("cargo:rerun-if-env-changed=XKK_PROTO_UPDATE");
 
     let checked_in_dir = manifest.join("generated");
@@ -46,19 +39,6 @@ fn main() {
             checked_in_dir.join(file).display()
         );
     }
-
-    let status = Command::new(&protoc)
-        .arg(format!(
-            "--plugin=protoc-gen-xmongo-trait={}",
-            xmongo_plugin.display()
-        ))
-        .arg(format!("--xmongo-trait_out={}", out_dir.display()))
-        .arg(format!("--proto_path={}", proto_dir.display()))
-        .arg(&protocol_proto)
-        .arg(&model_proto)
-        .status()
-        .expect("run protoc-gen-xmongo-trait");
-    assert!(status.success(), "protoc-gen-xmongo-trait failed");
 
     unsafe { std::env::set_var("PROTOC", &protoc) };
 
@@ -74,6 +54,7 @@ fn main() {
         .expect("compile xkk protobuf");
 
     normalize_generated_comments(&out_dir.join("xkk.v1.rs"));
+    generate_xmongo_traits(&descriptor_path, &out_dir);
     generate_registry(&descriptor_path, &out_dir.join("xkk.registry.rs"));
     sync_checked_in_generated(&out_dir, &checked_in_dir);
 }
@@ -88,9 +69,9 @@ fn normalize_generated_comments(path: &Path) {
 
 fn generate_registry(descriptor_path: &Path, output_path: &Path) {
     let descriptor = fs::read(descriptor_path).expect("read xkk descriptor set");
-    let source = xproto::codegen::generate_registry(
+    let source = xproto::generate_registry(
         &descriptor,
-        &xproto::codegen::RegistryOptions {
+        &xproto::RegistryOptions {
             enum_name: "MsgId",
             unspecified_name: "UNSPECIFIED",
             id_range: 100..=u16::MAX as i32,
@@ -102,14 +83,32 @@ fn generate_registry(descriptor_path: &Path, output_path: &Path) {
             notification_trait_path: "xproto::NotificationMessage",
             registry_type: "xproto::MessageRegistry",
             result_type: "Result<(), ProtocolError>",
-            registration: xproto::codegen::RegistrationKind::Application,
+            registration: xproto::RegistrationKind::Application,
             emit_constants: false,
-            emit_mappings: true,
-            msgid_path: "crate::pb::MsgId",
         },
     )
     .expect("generate xkk registry");
     fs::write(output_path, source).expect("write generated message registry");
+}
+
+fn generate_xmongo_traits(descriptor_path: &Path, out_dir: &Path) {
+    let descriptor = fs::read(descriptor_path).expect("read xkk descriptor set");
+    let descriptor =
+        FileDescriptorSet::decode(descriptor.as_slice()).expect("decode xkk descriptor set");
+    let response = protoc_gen_xmongo_trait::generate(CodeGeneratorRequest {
+        file_to_generate: vec!["xkk.proto".to_string(), "model.proto".to_string()],
+        proto_file: descriptor.file,
+        ..CodeGeneratorRequest::default()
+    });
+    if let Some(error) = response.error {
+        panic!("generate xmongo traits: {error}");
+    }
+    for file in response.file {
+        let name = file.name.expect("xmongo generated file has a name");
+        let content = file.content.expect("xmongo generated file has content");
+        let content = format!("{}\n", content.trim_end());
+        fs::write(out_dir.join(name), content).expect("write generated xmongo traits");
+    }
 }
 
 fn sync_checked_in_generated(out_dir: &Path, checked_in_dir: &Path) {

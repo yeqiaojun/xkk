@@ -26,6 +26,20 @@ pub(crate) struct SessionConfig {
 }
 
 impl SessionConfig {
+    // Gate session retention and rate limits are wire-behavior contracts. Exceeding them rejects
+    // the request or drops the oldest resumable message and always emits an error log.
+    pub const HARD_LIMITS: Self = Self {
+        outbox_messages: 256,
+        resume_ttl: Duration::from_secs(60),
+        reconnect_total: 10,
+        reconnect_window: Duration::from_secs(60),
+        reconnect_window_count: 5,
+        request_window: Duration::from_secs(5),
+        request_window_count: 15,
+        burst_window: Duration::from_secs(1),
+        burst_count: 8,
+    };
+
     pub fn validate(self) {
         assert!(
             self.outbox_messages > 0,
@@ -462,6 +476,11 @@ impl ClientSession {
             return Err(ResumeError::OutboxGap);
         }
         if self.reconnect_count >= config.reconnect_total {
+            tracing::error!(
+                reconnect_count = self.reconnect_count,
+                limit = config.reconnect_total,
+                "Gate reconnect total hard limit exceeded"
+            );
             return Err(ResumeError::RateLimited);
         }
         while self
@@ -472,6 +491,11 @@ impl ClientSession {
             self.reconnect_times.pop_front();
         }
         if self.reconnect_times.len() >= config.reconnect_window_count {
+            tracing::error!(
+                reconnect_count = self.reconnect_times.len(),
+                limit = config.reconnect_window_count,
+                "Gate reconnect window hard limit exceeded"
+            );
             return Err(ResumeError::RateLimited);
         }
         self.reconnect_count += 1;
@@ -543,6 +567,11 @@ impl ClientSession {
             self.request_times.pop_front();
         }
         if self.request_times.len() >= config.request_window_count {
+            tracing::error!(
+                request_count = self.request_times.len(),
+                limit = config.request_window_count,
+                "Gate request long-window hard limit exceeded"
+            );
             return false;
         }
         let burst = self
@@ -552,6 +581,11 @@ impl ClientSession {
             .take_while(|at| now.duration_since(**at) < config.burst_window)
             .count();
         if burst >= config.burst_count {
+            tracing::error!(
+                request_count = burst,
+                limit = config.burst_count,
+                "Gate request burst hard limit exceeded"
+            );
             return false;
         }
         self.request_times.push_back(now);
@@ -604,6 +638,11 @@ impl ClientSession {
         if is_outbox_message(msgid.as_u16()) {
             self.prune_outbox(now, config.resume_ttl);
             if self.outbox.len() == config.outbox_messages {
+                tracing::error!(
+                    retained = self.outbox.len(),
+                    limit = config.outbox_messages,
+                    "Gate outbox hard limit exceeded; dropping oldest message"
+                );
                 let dropped = self
                     .outbox
                     .pop_front()
@@ -666,14 +705,7 @@ mod tests {
     fn config() -> SessionConfig {
         SessionConfig {
             outbox_messages: 2,
-            resume_ttl: Duration::from_secs(60),
-            reconnect_total: 10,
-            reconnect_window: Duration::from_secs(60),
-            reconnect_window_count: 5,
-            request_window: Duration::from_secs(5),
-            request_window_count: 15,
-            burst_window: Duration::from_secs(1),
-            burst_count: 8,
+            ..SessionConfig::HARD_LIMITS
         }
     }
 

@@ -6,19 +6,19 @@ XKK is a Rust workspace containing five independently deployable server packages
 - `xkk-logic`: internal service listener and bounded per-player Logic Runtime.
 - `xkk-gate`: configurable external TCP/KCP/WebSocket listeners.
 - `xkk-public`: internal mail service and shared-state listener.
-- `xkk-query`: HTTP gamer/config queries plus health and readiness probes.
+- `xkk-query`: HTTP gamer queries plus health and readiness probes.
 - `xkk-robot`: one-shot Auth and Gate login through a configured TCP, KCP, or WebSocket endpoint.
 
 Shared application crates are deliberately narrow:
 
-- `xkk-config`: typed YAML loading, validation, common node/infrastructure/log fields, five explicit service configs, and the robot config.
+- `xkk-config`: typed common/role YAML and version JSON composition, validation, five explicit service configs, and the robot config.
 - `xkk-cache`: shared Redis player online-state, service-load, and login-queue protocols.
-- `xkk-persist`: shared Mongo protobuf model loading and saving.
+- `xkk-persist`: the shared Mongo collection catalog plus protobuf model loading and saving.
 - `xkk-common`: infrastructure-free time and credential helpers.
 
-Every service reads its own YAML file, connects etcd/Mongo/Redis through `xframe`, registers its
-role-specific endpoint, emits periodic structured runtime stats, and shuts down through the shared
-`xframe` signal runner.
+Every service reads an explicitly selected role YAML plus `common.yaml` and `version.json` from the
+same directory, connects etcd/Mongo/Redis through `xframe`, registers its role-specific endpoint,
+emits periodic structured runtime stats, and shuts down through the shared `xframe` signal runner.
 
 etcd carries stable discovery and lease data. Logic and Gate publish online counts to TTL-backed
 Redis hashes keyed by instance ID; Gate and Auth periodically load discovered instance fields into
@@ -52,13 +52,18 @@ registrations and the three expected Hello-validated service-link edges, then ru
 the cluster running. Use `-Action Status` to inspect it and `-Action Stop` to require graceful drain
 and immediate etcd deregistration. Runtime logs, smoke identity, and PIDs are kept under `.run/`.
 
-Protocol generation is deliberately pinned to the checked-in `tools/protoc.exe` and
-`tools/protoc-gen-xmongo-trait.exe`; normal Cargo builds fail when either tool is missing.
-`tools/protoc-gen-go-grpc.exe` is also retained locally for future Go gRPC generation.
+Protocol generation uses the pinned host-native `protoc-bin-vendored` dependency and calls the
+shared `protoc-gen-xmongo-trait` library directly, so ordinary builds verify artifacts on every
+supported host without relying on `PATH` or Windows executables.
 `proto/xkk.proto` contains wire messages and the shared `MsgId` enum;
 `proto/model.proto` contains persistence models only. Run `bash scripts/gen-proto.sh` after changing
-either proto or the xmongo generator. The script refreshes the reviewable Rust sources under
+either proto or the xmongo generator. The shell and PowerShell scripts refresh the reviewable Rust sources under
 `protocol/generated/`, and normal Cargo builds fail when those checked-in files are stale.
 
-The checked-in YAML files are explicit capacity contracts and local examples. Replace their DSNs,
-advertised hosts, and ports for each environment.
+The checked-in YAML files contain only deployment-varying identity, listeners, DSNs, secrets, and
+typed log settings. Stable limits, timeouts, windows, TTLs, and task periods are commented hard
+constants beside the code that enforces them; saturation is rejected or dropped with an error log.
+Replace the shared DSNs in `common.yaml`, and select the desired instance YAML explicitly at startup.
+Mongo DSNs must include the database. `version.json` supplies
+the configuration version; builds may inject the program version with `XKK_PRO_VERSION` and
+otherwise use `0`.

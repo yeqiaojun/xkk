@@ -4,4 +4,10 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+thiserror.workspace = true
 xframe.workspace = true
+xlru.workspace = true
+xkk-protocol.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

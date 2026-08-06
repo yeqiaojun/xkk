@@ -6,7 +6,6 @@ build = "build.rs"
 
 [dependencies]
 prost.workspace = true
-prost-reflect.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 xproto.workspace = true
@@ -16,4 +15,6 @@ xmongo.workspace = true
 prost.workspace = true
 prost-build.workspace = true
 prost-types.workspace = true
+protoc-bin-vendored.workspace = true
+protoc-gen-xmongo-trait.workspace = true
 xproto = { workspace = true, features = ["codegen"] }

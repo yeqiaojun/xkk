@@ -4,7 +4,8 @@
 - Player and Item are the only migrated gameplay modules. Do not migrate other Product modules
   without a separate scope decision.
 - Every player RPC must submit through `LogicRuntime`; never spawn independent same-gid work.
-- YAML capacities are mandatory and must map directly to `LogicConfig` and xnet/xrpc budgets.
+- Logic, xnet, and xrpc budgets are commented code constants owned by their enforcing modules;
+  rejected hard-limit admissions must be visible at error level.
 - Shutdown must stop Logic admission and flush dirty players before xrpc and storage close.
 - Login arbitration, old-session kick routing, player persistence, online ownership, and final
   dirty/inflight metrics remain owned here.

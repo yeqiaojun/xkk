@@ -32,10 +32,7 @@ enum MsgId {
   AUTH_USE_ROLE_RSP = 2003;
   GAMER_INFO_REQ = 2100;
   GAMER_INFO_RSP = 2101;
-  CONFIG_KEY_REQ = 2102;
-  CONFIG_KEY_RSP = 2103;
-  CONFIG_MANIFEST_REQ = 2104;
-  CONFIG_MANIFEST_RSP = 2105;
+  reserved 2102 to 2105;
   ACK_NTF = 3000;
   PING_REQ = 3001;
   PING_RSP = 3002;
@@ -334,30 +331,4 @@ message GamerInfoReq {
 message GamerInfoRsp {
   Status status = 1;
   repeated PlayerInfo players = 2;
-}
-
-message ConfigKeyReq {
-  string version = 1;
-}
-
-message ConfigKeyRsp {
-  Status status = 1;
-  string key = 2;
-}
-
-message ConfigManifestReq {
-  string version = 1;
-}
-
-message ConfigFile {
-  string name = 1; // @inject_tag: bson:"nm"
-  string path = 2; // @inject_tag: bson:"path"
-  string md5 = 3; // @inject_tag: bson:"md5"
-}
-
-message ConfigManifestRsp {
-  Status status = 1;
-  string version = 2;
-  string base_url = 3;
-  repeated ConfigFile files = 4;
 }

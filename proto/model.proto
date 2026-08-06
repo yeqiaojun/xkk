@@ -19,17 +19,13 @@ message PlayerData {
   map<int32, int64> items = 3; // @inject_tag: bson:"items,omitempty"
 }
 
-//@rust_bson_trait mail
-message GamerMailData {
+//@rust_bson_trait public_player
+message PublicPlayerData {
   int64 gid = 1; // @inject_tag: bson:"_id"
-  int64 next_mail_id = 2; // @inject_tag: bson:"next"
-  repeated Mail mails = 3; // @inject_tag: bson:"mails,omitempty"
+  MailData mail = 2; // @inject_tag: bson:"mail"
 }
 
-//@rust_bson_trait config
-message ConfigManifestData {
-  string version = 1; // @inject_tag: bson:"_id"
-  string key = 2; // @inject_tag: bson:"key"
-  string base_url = 3; // @inject_tag: bson:"url"
-  repeated ConfigFile files = 4; // @inject_tag: bson:"files,omitempty"
+message MailData {
+  int64 next_mail_id = 1; // @inject_tag: bson:"next"
+  repeated Mail mails = 2; // @inject_tag: bson:"mails,omitempty"
 }

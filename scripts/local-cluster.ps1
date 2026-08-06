@@ -429,22 +429,6 @@ function Invoke-BusinessSmoke {
         throw "Query gamer did not return the smoke player"
     }
 
-    $key = Invoke-JsonPost "http://127.0.0.1:3401/v1/query/config/key" @{
-        version = "local"
-    }
-    Assert-OkResponse $key "Query config key"
-    if ([string]::IsNullOrWhiteSpace($key.key)) {
-        throw "Query config key is empty"
-    }
-
-    $manifest = Invoke-JsonPost "http://127.0.0.1:3401/v1/query/config/manifest" @{
-        version = ""
-    }
-    Assert-OkResponse $manifest "Query config manifest"
-    if ([string]::IsNullOrWhiteSpace($manifest.version)) {
-        throw "Query config manifest version is empty"
-    }
-
     return [pscustomobject]@{
         Account = $account
         Gid = $gid

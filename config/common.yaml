@@ -1,0 +1,16 @@
+cluster: local
+
+infrastructure:
+  etcd_dsn: etcd://127.0.0.1:2379
+  mongo_dsn: mongodb://127.0.0.1:27017/xkk
+  redis_dsn: redis://127.0.0.1:6379
+
+security:
+  token_secret: local-xkk-token-secret
+  token_expire_seconds: 604800
+
+log:
+  level: info
+  stdout: true
+  rotation: daily
+  async_queue_capacity: 8192

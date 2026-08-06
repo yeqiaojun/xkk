@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use tokio::sync::Semaphore;
 use tokio::time::{Instant, timeout};
+use xkk_common::LatencyRecorder;
 use xmongo::mongodb::{
     bson::{Bson, Document},
     options::ClientOptions,
@@ -13,8 +14,8 @@ use xmongo::mongodb::{
 use xmongo::{BsonPathGetter, BsonPathValue, Client, DataPersister};
 
 use crate::{
-    LATENCY_BUCKETS_US, LatencyHistogram, LogicCallError, LogicConfig, LogicRuntime, LogicState,
-    Persistence, RejectReason, RuntimeState, ShutdownError,
+    LogicCallError, LogicConfig, LogicRuntime, LogicState, Persistence, RejectReason, RuntimeState,
+    ShutdownError,
 };
 
 #[derive(Debug)]
@@ -30,11 +31,13 @@ impl std::error::Error for TestError {}
 
 #[test]
 fn latency_histogram_reports_percentile_upper_bound() {
-    let mut counts = [0; LATENCY_BUCKETS_US.len()];
-    counts[0] = 98;
-    counts[8] = 1;
-    counts[9] = 1;
-    let histogram = LatencyHistogram { counts };
+    let histogram = LatencyRecorder::default();
+    for _ in 0..98 {
+        histogram.record(Duration::from_micros(10));
+    }
+    histogram.record(Duration::from_micros(5_000));
+    histogram.record(Duration::from_micros(10_000));
+    let histogram = histogram.snapshot();
 
     assert_eq!(histogram.count(), 100);
     assert_eq!(histogram.percentile_micros(98.0), Some(10));
@@ -823,5 +826,5 @@ async fn shutdown_uses_the_optional_batch_saver() {
     assert_eq!(batch_calls.load(Ordering::Relaxed), 1);
     let stats = runtime.stats();
     assert_eq!(stats.dirty_players, 0);
-    assert_eq!(stats.flush_latency.counts.iter().sum::<u64>(), 1);
+    assert_eq!(stats.flush_latency.count(), 1);
 }

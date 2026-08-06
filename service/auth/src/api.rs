@@ -8,13 +8,27 @@ use xframe::{
 };
 use xkk_cache::{allocate_gid, enqueue_login, leave_login_queue, load_online, set_token};
 use xkk_common::{credential_hash, unix_millis, unix_seconds};
-use xkk_config::AuthConfig;
+use xkk_config::Security;
 use xkk_persist::{load_model, save_model};
 use xkk_protocol::{code, error_status, ok_status, pb};
 use xtoken::TokenCoder;
 
 pub(crate) const LOGIN_PATH: &str = "/v1/auth/login";
 pub(crate) const USE_ROLE_PATH: &str = "/v1/auth/use-role";
+
+// These are product admission contracts. Changing them requires reviewing Redis pressure,
+// Gate sizing, client retry behavior, and the corresponding overload logs together.
+const LOGIN_GLOBAL_LIMIT: i64 = 1_000;
+const LOGIN_PER_IP_LIMIT: i64 = 20;
+const LOGIN_RATE_WINDOW: Duration = Duration::from_secs(5);
+const ROLE_ADMISSION_LIMIT: i64 = 200;
+const ROLE_ADMISSION_WINDOW: Duration = Duration::from_secs(1);
+const HTTP_INFLIGHT_CAPACITY: usize = 1_024;
+const GATE_PLAYER_CAPACITY: i32 = 10_000;
+const LOGIN_QUEUE_CAPACITY: i64 = 100_000;
+const LOGIN_QUEUE_RETRY_SECONDS: i64 = 3;
+const LOGIN_QUEUE_ENTRY_TTL: Duration = Duration::from_secs(30);
+const ACCOUNT_LOCK_TTL: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub(crate) struct AuthApi {
@@ -36,42 +50,34 @@ pub(crate) struct AuthApi {
 impl AuthApi {
     pub(crate) fn new(
         frame: FrameHandle,
-        mongo: xmongo::Client,
+        accounts: xmongo::Collection<Document>,
         redis: xframe::xredis::Client,
-        config: &AuthConfig,
+        security: &Security,
     ) -> Self {
         Self {
-            accounts: mongo.collection(
-                &config.storage.mongo_database,
-                &config.storage.account_collection,
-            ),
-            token: TokenCoder::new(
-                &config.security.token_secret,
-                config.security.token_expire_seconds,
-            ),
+            accounts,
+            token: TokenCoder::new(&security.token_secret, security.token_expire_seconds),
             login_global: redis.rate_limiter(
                 "xkk:auth:login:global",
-                config.capacity.login_global_limit,
-                Duration::from_millis(config.runtime.login_rate_window_ms),
+                LOGIN_GLOBAL_LIMIT,
+                LOGIN_RATE_WINDOW,
             ),
             login_per_ip: redis.rate_limiter(
                 "xkk:auth:login:ip",
-                config.capacity.login_per_ip_limit,
-                Duration::from_millis(config.runtime.login_rate_window_ms),
+                LOGIN_PER_IP_LIMIT,
+                LOGIN_RATE_WINDOW,
             ),
             role_admission: redis.rate_limiter(
                 "xkk:auth:role:admission",
-                config.capacity.role_admission_limit,
-                Duration::from_millis(config.runtime.role_admission_window_ms),
+                ROLE_ADMISSION_LIMIT,
+                ROLE_ADMISSION_WINDOW,
             ),
-            inflight: Arc::new(Semaphore::new(config.capacity.max_inflight_requests)),
-            gate_player_capacity: config.capacity.gate_player_capacity,
-            login_queue_capacity: config.capacity.login_queue_capacity,
-            login_queue_retry_seconds: config.runtime.login_queue_retry_seconds,
-            login_queue_entry_ttl: Duration::from_secs(
-                config.runtime.login_queue_entry_ttl_seconds,
-            ),
-            account_lock_ttl: Duration::from_secs(config.runtime.account_lock_seconds),
+            inflight: Arc::new(Semaphore::new(HTTP_INFLIGHT_CAPACITY)),
+            gate_player_capacity: GATE_PLAYER_CAPACITY,
+            login_queue_capacity: LOGIN_QUEUE_CAPACITY,
+            login_queue_retry_seconds: LOGIN_QUEUE_RETRY_SECONDS,
+            login_queue_entry_ttl: LOGIN_QUEUE_ENTRY_TTL,
+            account_lock_ttl: ACCOUNT_LOCK_TTL,
             frame,
             redis,
         }
@@ -87,6 +93,10 @@ impl AuthApi {
         request: pb::AuthLoginReq,
     ) -> pb::AuthLoginRsp {
         let Ok(_permit) = self.inflight.clone().try_acquire_owned() else {
+            tracing::error!(
+                limit = HTTP_INFLIGHT_CAPACITY,
+                "Auth HTTP inflight hard limit exceeded"
+            );
             return login_error(code::OVERLOADED, "Auth request capacity exhausted");
         };
         let Some(device) = request.device.as_ref() else {
@@ -109,7 +119,16 @@ impl AuthApi {
         let per_ip = self.login_per_ip.allow(&ip).await;
         match (global, per_ip) {
             (Ok(global), Ok(per_ip)) if global.allowed && per_ip.allowed => {}
-            (Ok(_), Ok(_)) => return login_error(code::RATE_LIMITED, "login rate exceeded"),
+            (Ok(global), Ok(per_ip)) => {
+                tracing::error!(
+                    account = %request.account,
+                    client_ip = %ip,
+                    global_allowed = global.allowed,
+                    per_ip_allowed = per_ip.allowed,
+                    "Auth login rate hard limit exceeded"
+                );
+                return login_error(code::RATE_LIMITED, "login rate exceeded");
+            }
             (Err(error), _) | (_, Err(error)) => {
                 tracing::error!(account = %request.account, %error, "Auth login limiter failed");
                 return login_error(code::INTERNAL, "login limiter failed");
@@ -168,6 +187,11 @@ impl AuthApi {
         let lock = match self.redis.try_lock(lock_key, self.account_lock_ttl).await {
             Ok(Some(lock)) => lock,
             Ok(None) => {
+                tracing::error!(
+                    account,
+                    limit_seconds = ACCOUNT_LOCK_TTL.as_secs(),
+                    "Auth account lock hard limit reached"
+                );
                 return Err(error_status(
                     code::RATE_LIMITED,
                     "account login in progress",
@@ -233,6 +257,10 @@ impl AuthApi {
         request: pb::AuthUseRoleReq,
     ) -> pb::AuthUseRoleRsp {
         let Ok(_permit) = self.inflight.clone().try_acquire_owned() else {
+            tracing::error!(
+                limit = HTTP_INFLIGHT_CAPACITY,
+                "Auth HTTP inflight hard limit exceeded"
+            );
             return use_role_error(code::OVERLOADED, "Auth request capacity exhausted");
         };
         if request.gid <= 0 || request.token.is_empty() || request.device_id.len() < 8 {
@@ -281,6 +309,12 @@ impl AuthApi {
             }
         };
         if position > self.login_queue_capacity {
+            tracing::error!(
+                gid = request.gid,
+                position,
+                limit = self.login_queue_capacity,
+                "Auth login queue hard limit exceeded"
+            );
             let _ = leave_login_queue(&self.redis, request.gid).await;
             return use_role_error(code::OVERLOADED, "login queue is full");
         }
@@ -298,6 +332,11 @@ impl AuthApi {
         match self.role_admission.allow("all").await {
             Ok(result) if result.allowed => {}
             Ok(_) => {
+                tracing::error!(
+                    gid = request.gid,
+                    limit = ROLE_ADMISSION_LIMIT,
+                    "Auth role admission hard limit exceeded"
+                );
                 return pb::AuthUseRoleRsp {
                     status: Some(ok_status()),
                     gid: request.gid,

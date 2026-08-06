@@ -1,43 +1,8 @@
 node:
-  cluster: local
   instance_id: 1
   advertise_host: 127.0.0.1
   listen_host: 127.0.0.1
   service_port: 3101
-  pro_version: 0
-  conf_version: 0
-
-infrastructure:
-  etcd_dsn: etcd://127.0.0.1:2379
-  mongo_dsn: mongodb://127.0.0.1:27017
-  redis_dsn: redis://127.0.0.1:6379
-  etcd_lease_ttl_seconds: 15
-
-storage:
-  mongo_database: xkk
-  player_collection: players
-
-capacity:
-  rpc_pending: 100000
-  write_queue: 1024
-  resident_players: 100000
-  max_dirty_players: 100000
-  max_inflight_calls: 100000
-  max_inflight_kib: 262144
-  max_calls_per_gid: 64
-  max_kib_per_gid: 1024
-  mailbox_shards: 128
-  batch_save_count: 1000
-
-runtime:
-  player_ttl_seconds: 86400
-  rpc_timeout_ms: 3000
-  shutdown_drain_seconds: 10
-  service_load_interval_seconds: 3
-  metrics_interval_seconds: 10
 
 log:
-  level: info
-  stdout: true
   file: logs/logic.log
-  async_queue_capacity: 8192

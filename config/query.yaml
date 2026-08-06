@@ -1,38 +1,8 @@
 node:
-  cluster: local
   instance_id: 1
   advertise_host: 127.0.0.1
   listen_host: 0.0.0.0
   http_port: 3401
-  pro_version: 0
-  conf_version: 0
-
-infrastructure:
-  etcd_dsn: etcd://127.0.0.1:2379
-  mongo_dsn: mongodb://127.0.0.1:27017
-  redis_dsn: redis://127.0.0.1:6379
-  etcd_lease_ttl_seconds: 15
-
-storage:
-  mongo_database: xkk
-  player_collection: players
-  manifest_collection: config_manifests
-  current_manifest_version: local
-  current_manifest_key: local-development-key
-  current_manifest_base_url: http://127.0.0.1:3401/config
-
-capacity:
-  rpc_pending: 100000
-  max_http_body_bytes: 8192
-  max_inflight_requests: 1024
-  max_gamer_ids: 100
-
-runtime:
-  shutdown_drain_seconds: 10
-  metrics_interval_seconds: 10
 
 log:
-  level: info
-  stdout: true
   file: logs/query.log
-  async_queue_capacity: 8192

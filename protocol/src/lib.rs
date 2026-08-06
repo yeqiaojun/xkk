@@ -9,14 +9,10 @@ pub mod pb {
 }
 
 pub use message::{
-    MessageKind, OUTBOX_EXCLUDED_RANGES, RouteTarget, from_u16, is_outbox_message, request_for,
-    response_for, route_target,
+    MessageKind, RouteTarget, from_u16, is_outbox_message, response_for, route_target,
 };
 pub use pb::MsgId;
-pub use registry::{
-    ProtocolError, client_registry, descriptor_set, init_global_registry, message_id,
-    message_id_of, message_registry, new_message, validate_pair,
-};
+pub use registry::{ProtocolError, descriptor_set, init_global_registry, message_registry};
 pub use status::{code, error_status, ok_status};
 
 #[cfg(test)]

@@ -21,6 +21,7 @@ edition = "2024"
 
 [workspace.dependencies]
 bytes = "1.12.1"
+dashmap = "6.1.0"
 http-body-util = "0.1.4"
 hyper = { version = "1.11.0", features = ["client", "http1"] }
 hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1", "tokio"] }
@@ -47,6 +48,8 @@ prost = "0.14.4"
 prost-build = "0.14.4"
 prost-types = "0.14.4"
 prost-reflect = { version = "0.16.5", features = ["serde"] }
+protoc-bin-vendored = "3.2.0"
+protoc-gen-xmongo-trait = { path = "../deps-rust/tools/protoc-gen-xmongo-trait" }
 
 [profile.release]
 lto = "thin"

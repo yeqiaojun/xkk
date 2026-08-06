@@ -179,38 +179,3 @@ impl ::xmongo::BsonPathGetter for Mail {
         __xmongo_from_bson_mail(value)
     }
 }
-
-#[inline]
-fn __xmongo_to_bson_config_file(value: &ConfigFile) -> ::xmongo::Result<::xmongo::mongodb::bson::Bson> {
-    let mut doc = ::xmongo::mongodb::bson::Document::new();
-    doc.insert("nm", ::xmongo::mongodb::bson::Bson::String(value.name.clone()));
-    doc.insert("path", ::xmongo::mongodb::bson::Bson::String(value.path.clone()));
-    doc.insert("md5", ::xmongo::mongodb::bson::Bson::String(value.md5.clone()));
-    Ok(::xmongo::mongodb::bson::Bson::Document(doc))
-}
-
-#[inline]
-fn __xmongo_from_bson_config_file(value: &::xmongo::mongodb::bson::Bson) -> ::xmongo::Result<ConfigFile> {
-    let doc = ::xmongo::bson_document(value, "ConfigFile")?;
-    let mut out = ConfigFile::default();
-    if let Some(value) = doc.get("nm") {
-        out.name = ::xmongo::bson_string(value, "nm")?.to_string();
-    }
-    if let Some(value) = doc.get("path") {
-        out.path = ::xmongo::bson_string(value, "path")?.to_string();
-    }
-    if let Some(value) = doc.get("md5") {
-        out.md5 = ::xmongo::bson_string(value, "md5")?.to_string();
-    }
-    Ok(out)
-}
-
-impl ::xmongo::BsonPathGetter for ConfigFile {
-    fn bson_value(&self) -> ::xmongo::Result<::xmongo::mongodb::bson::Bson> {
-        __xmongo_to_bson_config_file(self)
-    }
-
-    fn from_bson_value(value: &::xmongo::mongodb::bson::Bson) -> ::xmongo::Result<Self> {
-        __xmongo_from_bson_config_file(value)
-    }
-}

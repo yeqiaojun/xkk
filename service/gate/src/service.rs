@@ -22,6 +22,17 @@ use crate::{
 };
 pub use xkk_config::GateConfig as Config;
 
+// One Gate process has fixed transport and lifecycle budgets. Reaching these bounds rejects new
+// work and is surfaced by the event path or the periodic overload counters below.
+const SERVICE_WRITE_QUEUE_CAPACITY: usize = 1_024;
+const MAX_EXTERNAL_HANDSHAKES: usize = 256;
+const MAX_EXTERNAL_CONNECTIONS: usize = 65_536;
+const RPC_PENDING_CAPACITY: usize = 100_000;
+const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
+const SERVICE_LOAD_PUBLISH_INTERVAL: Duration = Duration::from_secs(3);
+const LOGIC_LOAD_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+const METRICS_REPORT_INTERVAL: Duration = Duration::from_secs(10);
+
 #[derive(Debug, Error)]
 pub enum ServiceError {
     #[error(transparent)]
@@ -34,6 +45,8 @@ pub enum ServiceError {
     LogClose(#[source] io::Error),
     #[error(transparent)]
     Mongo(#[from] xframe::xmongo::Error),
+    #[error(transparent)]
+    Persist(#[from] xkk_persist::Error),
     #[error(transparent)]
     Redis(#[from] xframe::xredis::Error),
     #[error(transparent)]
@@ -64,14 +77,14 @@ fn network_server(config: &Config) -> xframe::xnet::ServerConfig {
     }
 
     let transport = xframe::xnet::TransportOptions::default()
-        .with_write_queue_capacity(config.capacity.write_queue)
+        .with_write_queue_capacity(SERVICE_WRITE_QUEUE_CAPACITY)
         .with_websocket_path(&config.listeners.websocket_path);
     xframe::xnet::ServerConfig::new(listeners)
         .with_role(xframe::xnet::ConnectionRole::client())
         .with_transport(transport)
         .with_admission(xframe::xnet::AdmissionConfig::new(
-            config.capacity.max_external_handshakes,
-            config.capacity.max_external_connections,
+            MAX_EXTERNAL_HANDSHAKES,
+            MAX_EXTERNAL_CONNECTIONS,
         ))
 }
 
@@ -107,13 +120,11 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
         &config.node.advertise_host,
         primary_port,
     )?
-    .with_versions(config.node.pro_version, config.node.conf_version)
+    .with_versions(config.version.program, config.version.conf)
     .with_meta_data(metadata);
-    let discovery = DiscoveryConfig::new(&config.infrastructure.etcd_dsn)?.with_lease_ttl(
-        Duration::from_secs(config.infrastructure.etcd_lease_ttl_seconds),
-    )?;
+    let discovery = DiscoveryConfig::new(&config.infrastructure.etcd_dsn)?;
     let service_transport = xframe::xnet::TransportOptions::default()
-        .with_write_queue_capacity(config.capacity.write_queue);
+        .with_write_queue_capacity(SERVICE_WRITE_QUEUE_CAPACITY);
 
     Ok(FrameConfig::new(node)
         .with_discovery(discovery)
@@ -124,34 +135,15 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
         .with_redis(xframe::xredis::RedisConfig::new(
             &config.infrastructure.redis_dsn,
         )?)
-        .with_rpc(RpcConfig::new(config.capacity.rpc_pending)?)
-        .with_shutdown(ShutdownConfig::new(Duration::from_secs(
-            config.runtime.shutdown_drain_seconds,
-        ))?))
-}
-
-fn session_config(config: &Config) -> SessionConfig {
-    SessionConfig {
-        outbox_messages: config.capacity.outbox_messages,
-        resume_ttl: Duration::from_secs(config.runtime.resume_seconds),
-        reconnect_total: config.runtime.reconnect_total,
-        reconnect_window: Duration::from_secs(config.runtime.reconnect_window_seconds),
-        reconnect_window_count: config.runtime.reconnect_window_count,
-        request_window: Duration::from_millis(config.runtime.client_request_window_ms),
-        request_window_count: config.capacity.client_request_window_count,
-        burst_window: Duration::from_millis(config.runtime.client_burst_window_ms),
-        burst_count: config.capacity.client_burst_count,
-    }
+        .with_rpc(RpcConfig::new(RPC_PENDING_CAPACITY)?)
+        .with_shutdown(ShutdownConfig::new(SHUTDOWN_DRAIN_TIMEOUT)?))
 }
 
 fn gateway_settings(config: &Config) -> GatewaySettings {
     GatewaySettings {
         gate_id: config.node.instance_id,
-        client_mailbox: config.capacity.client_mailbox,
-        rpc_timeout: Duration::from_millis(config.runtime.rpc_timeout_ms),
         token_secret: config.security.token_secret.clone(),
         token_expire_seconds: config.security.token_expire_seconds,
-        shutdown_cleanup_concurrency: config.capacity.shutdown_cleanup_concurrency,
     }
 }
 
@@ -164,11 +156,8 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
     let log_options = config.log.options("logs/gate.log");
     let frame_config = frame_config(&config)?;
     let network_server = network_server(&config);
-    let session_config = session_config(&config);
     let gateway_settings = gateway_settings(&config);
     let cluster = config.node.cluster.clone();
-    let service_load_interval = Duration::from_secs(config.runtime.service_load_interval_seconds);
-    let metrics_interval = Duration::from_secs(config.runtime.metrics_interval_seconds);
     let instance_id = config.node.instance_id;
     let log_guard = xlog::init_global(log_options)?;
 
@@ -179,9 +168,13 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
         let redis = handle
             .redis()
             .expect("Gate FrameConfig always enables Redis");
+        let mongo = handle
+            .mongo()
+            .expect("Gate FrameConfig always enables Mongo");
+        let _collections = xkk_persist::Collections::new(mongo)?;
         let application_redis = redis.clone();
         let online_count = Arc::new(AtomicI32::new(0));
-        let sessions = ClientSessions::new(session_config);
+        let sessions = ClientSessions::new(SessionConfig::HARD_LIMITS);
         let gateway = Gateway::new(
             handle,
             prepared.rpc().clone(),
@@ -197,8 +190,9 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
                 cluster,
                 instance_id,
                 application_redis,
-                service_load_interval,
-                metrics_interval,
+                SERVICE_LOAD_PUBLISH_INTERVAL,
+                LOGIC_LOAD_REFRESH_INTERVAL,
+                METRICS_REPORT_INTERVAL,
                 gateway,
             ))
             .await?;
@@ -223,10 +217,12 @@ struct GateApplication {
     cluster: String,
     instance_id: i32,
     redis: xframe::xredis::Client,
-    service_load_interval: Duration,
+    service_load_publish_interval: Duration,
+    logic_refresh_interval: Duration,
     metrics_interval: Duration,
     gateway: Gateway,
-    service_load_task: Option<JoinHandle<()>>,
+    service_load_publish_task: Option<JoinHandle<()>>,
+    logic_refresh_task: Option<JoinHandle<()>>,
     metrics_task: Option<JoinHandle<()>>,
 }
 
@@ -235,7 +231,8 @@ impl GateApplication {
         cluster: String,
         instance_id: i32,
         redis: xframe::xredis::Client,
-        service_load_interval: Duration,
+        service_load_publish_interval: Duration,
+        logic_refresh_interval: Duration,
         metrics_interval: Duration,
         gateway: Gateway,
     ) -> Self {
@@ -243,10 +240,12 @@ impl GateApplication {
             cluster,
             instance_id,
             redis,
-            service_load_interval,
+            service_load_publish_interval,
+            logic_refresh_interval,
             metrics_interval,
             gateway,
-            service_load_task: None,
+            service_load_publish_task: None,
+            logic_refresh_task: None,
             metrics_task: None,
         }
     }
@@ -266,24 +265,34 @@ impl Application for GateApplication {
             ServiceType::Gate.as_i32(),
             self.instance_id,
             self.gateway.online_count(),
-            service_online_ttl(self.service_load_interval),
+            service_online_ttl(self.service_load_publish_interval),
         )
         .await?;
         refresh_service_online(&frame, &self.redis, &self.cluster, ServiceType::Logic).await?;
-        self.service_load_task = Some(spawn_service_loads(
-            frame.clone(),
+        self.service_load_publish_task = Some(spawn_service_online_publish(
             self.redis.clone(),
             self.cluster.clone(),
             self.instance_id,
             self.gateway.clone(),
-            self.service_load_interval,
+            self.service_load_publish_interval,
+        ));
+        self.logic_refresh_task = Some(spawn_logic_online_refresh(
+            frame.clone(),
+            self.redis.clone(),
+            self.cluster.clone(),
+            self.logic_refresh_interval,
         ));
         self.metrics_task = spawn_metrics(frame, self.gateway.clone(), self.metrics_interval);
         Ok(())
     }
 
     async fn shutdown(&mut self, _frame: FrameHandle) -> ApplicationResult {
-        stop_task(&mut self.service_load_task, "Gate service load").await;
+        stop_task(
+            &mut self.service_load_publish_task,
+            "Gate service load publish",
+        )
+        .await;
+        stop_task(&mut self.logic_refresh_task, "Gate Logic load refresh").await;
         stop_task(&mut self.metrics_task, "Gate metrics").await;
         if let Err(error) = delete_service_online(
             &self.redis,
@@ -318,8 +327,7 @@ async fn refresh_service_online(
     Ok(())
 }
 
-fn spawn_service_loads(
-    frame: FrameHandle,
+fn spawn_service_online_publish(
     redis: xframe::xredis::Client,
     cluster: String,
     instance_id: i32,
@@ -345,6 +353,21 @@ fn spawn_service_loads(
             {
                 tracing::warn!(online_count, %error, "Gate service online publish failed");
             }
+        }
+    })
+}
+
+fn spawn_logic_online_refresh(
+    frame: FrameHandle,
+    redis: xframe::xredis::Client,
+    cluster: String,
+    interval: Duration,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
             if let Err(error) =
                 refresh_service_online(&frame, &redis, &cluster, ServiceType::Logic).await
             {
@@ -376,6 +399,10 @@ fn spawn_metrics(
     }
     Some(tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
+        let mut last_rpc_pending_rejected = 0;
+        let mut last_write_queue_rejected = 0;
+        let mut last_handshakes_rejected = 0;
+        let mut last_connections_rejected = 0;
         ticker.tick().await;
         loop {
             ticker.tick().await;
@@ -384,6 +411,58 @@ fn spawn_metrics(
             let online_count = gateway.online_count();
             let login = gateway.login_stats();
             let stats = frame.stats();
+            let write_queue_rejected = stats.sessions.outbound_rejected_full
+                + stats
+                    .listeners
+                    .iter()
+                    .map(|listener| listener.outbound_rejected_full)
+                    .sum::<u64>();
+            let handshakes_rejected = stats
+                .listeners
+                .iter()
+                .map(|listener| listener.rejected_external_handshakes)
+                .sum::<u64>();
+            let connections_rejected = stats
+                .listeners
+                .iter()
+                .map(|listener| listener.rejected_external_connections)
+                .sum::<u64>();
+            if stats.rpc.pending_rejected > last_rpc_pending_rejected {
+                tracing::error!(
+                    rejected = stats.rpc.pending_rejected - last_rpc_pending_rejected,
+                    total_rejected = stats.rpc.pending_rejected,
+                    limit = RPC_PENDING_CAPACITY,
+                    "Gate RPC pending hard limit exceeded"
+                );
+                last_rpc_pending_rejected = stats.rpc.pending_rejected;
+            }
+            if write_queue_rejected > last_write_queue_rejected {
+                tracing::error!(
+                    rejected = write_queue_rejected - last_write_queue_rejected,
+                    total_rejected = write_queue_rejected,
+                    limit = SERVICE_WRITE_QUEUE_CAPACITY,
+                    "Gate write queue hard limit exceeded"
+                );
+                last_write_queue_rejected = write_queue_rejected;
+            }
+            if handshakes_rejected > last_handshakes_rejected {
+                tracing::error!(
+                    rejected = handshakes_rejected - last_handshakes_rejected,
+                    total_rejected = handshakes_rejected,
+                    limit = MAX_EXTERNAL_HANDSHAKES,
+                    "Gate external handshake hard limit exceeded"
+                );
+                last_handshakes_rejected = handshakes_rejected;
+            }
+            if connections_rejected > last_connections_rejected {
+                tracing::error!(
+                    rejected = connections_rejected - last_connections_rejected,
+                    total_rejected = connections_rejected,
+                    limit = MAX_EXTERNAL_CONNECTIONS,
+                    "Gate external connection hard limit exceeded"
+                );
+                last_connections_rejected = connections_rejected;
+            }
             tracing::info!(
                 frame_state = ?stats.state,
                 active_sessions = stats.sessions.active_sessions,
@@ -422,15 +501,23 @@ mod tests {
 
     #[test]
     fn example_config_enables_all_external_transports() {
-        let config = Config::parse(include_str!("../../../config/gate.yaml")).unwrap();
+        let config = Config::parse(
+            include_str!("../../../config/common.yaml"),
+            include_str!("../../../config/gate.yaml"),
+            include_str!("../../../config/version.json"),
+        )
+        .unwrap();
         let frame = frame_config(&config).unwrap();
         let server = network_server(&config);
 
         assert_eq!(server.listeners.len(), 3);
         assert!(frame.service_server.is_none());
         assert_eq!(frame.node.port(), 3201);
-        assert_eq!(config.runtime.service_load_interval_seconds, 3);
-        assert_eq!(frame.service_client_transport.write_queue_capacity, 1024);
+        assert_eq!(frame.rpc.pending_capacity(), RPC_PENDING_CAPACITY);
+        assert_eq!(
+            frame.service_client_transport.write_queue_capacity,
+            SERVICE_WRITE_QUEUE_CAPACITY
+        );
         assert_eq!(
             frame.node.meta_data().get("primary_transport").unwrap(),
             "tcp"

@@ -4,10 +4,11 @@
 
 - `service/auth`, `service/logic`, `service/gate`, `service/public`, and `service/query` are independent deployable packages.
 - `robot` is a one-shot login client. It must not grow stress, smoke, reconnect, logout, or business-module loops.
-- `config` owns all typed YAML models, shared configuration fields, loading, validation, and log option conversion.
+- `config` owns all typed YAML/JSON models, shared configuration composition, loading, validation,
+  build/configuration versions, and log option conversion.
 - Each service owns only its listeners, discovery watches, role-specific `xframe` composition, and application lifecycle.
 - `cache` owns shared Redis protocols and depends directly on xredis; it must not know FrameHandle
-  or mutate xservice. `persist` owns shared Mongo model access, and `common` contains
+  or mutate xservice. `persist` owns the Mongo collection catalog and shared model access, and `common` contains
   infrastructure-free helpers.
 - Do not introduce a shared bootstrap crate until repeated application behavior exists beyond `xframe`.
 - All services connect etcd, Mongo, and Redis before admission and register their real published endpoint.
@@ -63,22 +64,26 @@
 - `proto/xkk.proto` owns wire messages and the globally unique `MsgId` enum used by front and back ends.
 - `proto/model.proto` owns Mongo persistence models only. Do not split wire messages into more files without a concrete maintenance need.
 - Never duplicate numeric message IDs in Rust. `xkk-protocol` must use the enum generated from `MsgId`.
-- Generate every protocol artifact with the pinned binaries under this repository's `tools/`
-  directory.
-- Rust protobuf generation must use `tools/protoc.exe`, and Mongo persistence traits must use
-  `tools/protoc-gen-xmongo-trait.exe`. Do not fall back to tools found through `PATH` or to a
-  generator fetched through a dependency.
+- Resolve the host-native protobuf compiler through the pinned `protoc-bin-vendored` dependency;
+  do not depend on `PATH` or a repository-local Windows executable.
+- Generate Mongo persistence traits by calling the shared `protoc-gen-xmongo-trait` library from
+  `protocol/build.rs`, using the same descriptor set as prost and registry generation.
 - Run `bash scripts/gen-proto.sh` after changing either proto or the xmongo generator, and commit
   the refreshed Rust sources under `protocol/generated/`.
-- Keep this binding in `protocol/build.rs` so normal Cargo builds fail fast when either required
-  binary is missing or the checked-in generated sources are stale.
+- Keep generation in `protocol/build.rs` so normal Cargo builds fail fast when checked-in generated
+  sources are stale on every supported host.
 
 ## Configuration
 
-- Each service loads its role-specific type from `xkk-config` and converts it once into `xframe::FrameConfig`.
-- Keep role-specific storage, capacity, runtime, and listener fields explicit; share only fields with identical semantics.
-- Capacities that bound retained work must be explicit in YAML. Do not silently fall back to library defaults.
-- Fail fast on missing fields, invalid topology, invalid capacity, or unavailable infrastructure.
+- Each service loads an explicitly selected role YAML plus sibling `common.yaml` and `version.json`
+  through `xkk-config`, then converts the composed role-specific type once into `xframe::FrameConfig`.
+- Keep YAML for deployment-varying identity, listeners, DSNs, secrets, and typed log settings.
+  Stable limits, windows, TTLs, timeouts, and task periods are commented hard constants in the
+  module that enforces them; do not recreate generic top-level `runtime` or `capacity` buckets.
+- A hard-limit rejection or forced drop must emit an error log containing the limit and context.
+  Only the typed log override may overlap Common Configuration.
+- Mongo database comes from the DSN. Collection names and handles come only from `xkk-persist`.
+- Fail fast on missing fields, invalid topology, invalid deployment values, or unavailable infrastructure.
 
 ## Local Cluster
 
@@ -86,7 +91,7 @@
 - A successful start requires all five processes, five etcd registrations, Auth and Query
   readiness, and the Gate-to-Logic, Gate-to-Public, and Logic-to-Public Hello-validated links.
 - The start path must complete Auth login/use-role, Gate login/reconnect/logout, Logic player info,
-  Public mail list, and Query gamer/config smoke checks before writing cluster state.
+  Public mail list, and Query gamer smoke checks before writing cluster state.
 - The stop path must remove all five registrations and prove Gate/Logic retained work is zero.
 - Keep generated PIDs and logs under `.run/`; do not write runtime artifacts into source packages.
 

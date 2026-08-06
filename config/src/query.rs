@@ -2,57 +2,54 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::{HttpNode, Infrastructure, LogSettings, Result, invalid, load, parse};
+use crate::{
+    HttpNode, Infrastructure, LogSettings, Result, ServiceVersion, load_service,
+    log::LogOverride,
+    parse_service,
+    shared::{CommonConfig, HttpNodeConfig},
+};
 
 const SERVICE: &str = "Query";
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 pub struct QueryConfig {
     pub node: HttpNode,
     pub infrastructure: Infrastructure,
-    pub storage: QueryStorage,
-    pub capacity: QueryCapacity,
-    pub runtime: QueryRuntime,
     pub log: LogSettings,
+    pub version: ServiceVersion,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct QueryStorage {
-    pub mongo_database: String,
-    pub player_collection: String,
-    pub manifest_collection: String,
-    pub current_manifest_version: String,
-    pub current_manifest_key: String,
-    pub current_manifest_base_url: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct QueryCapacity {
-    pub rpc_pending: usize,
-    pub max_http_body_bytes: usize,
-    pub max_inflight_requests: usize,
-    pub max_gamer_ids: usize,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct QueryRuntime {
-    pub shutdown_drain_seconds: u64,
-    pub metrics_interval_seconds: u64,
+struct QueryRoleConfig {
+    node: HttpNodeConfig,
+    #[serde(default)]
+    log: LogOverride,
 }
 
 impl QueryConfig {
     pub fn load(path: impl Into<PathBuf>) -> Result<Self> {
-        let config: Self = load(path)?;
-        config.validate()?;
-        Ok(config)
+        let (common, role, version) = load_service(path)?;
+        Self::compose(common, role, version)
     }
 
-    pub fn parse(yaml: &str) -> Result<Self> {
-        let config: Self = parse(yaml)?;
+    pub fn parse(common_yaml: &str, role_yaml: &str, version_json: &str) -> Result<Self> {
+        let (common, role, version) = parse_service(common_yaml, role_yaml, version_json)?;
+        Self::compose(common, role, version)
+    }
+
+    fn compose(
+        common: CommonConfig,
+        role: QueryRoleConfig,
+        version: ServiceVersion,
+    ) -> Result<Self> {
+        common.validate(SERVICE)?;
+        let config = Self {
+            node: role.node.compose(common.cluster.clone()),
+            infrastructure: common.infrastructure,
+            log: common.log.apply(role.log),
+            version,
+        };
         config.validate()?;
         Ok(config)
     }
@@ -60,29 +57,6 @@ impl QueryConfig {
     pub fn validate(&self) -> Result<()> {
         self.node.validate(SERVICE)?;
         self.infrastructure.validate(SERVICE)?;
-        self.log.validate(SERVICE)?;
-        if self.storage.mongo_database.is_empty()
-            || self.storage.player_collection.is_empty()
-            || self.storage.manifest_collection.is_empty()
-            || self.storage.current_manifest_version.is_empty()
-            || self.storage.current_manifest_key.is_empty()
-            || self.storage.current_manifest_base_url.is_empty()
-        {
-            return Err(invalid(SERVICE, "storage settings must not be empty"));
-        }
-        if self.capacity.rpc_pending == 0
-            || self.capacity.max_http_body_bytes == 0
-            || self.capacity.max_inflight_requests == 0
-            || self.capacity.max_gamer_ids == 0
-        {
-            return Err(invalid(SERVICE, "capacity values must be positive"));
-        }
-        if self.runtime.shutdown_drain_seconds == 0 {
-            return Err(invalid(
-                SERVICE,
-                "runtime.shutdown_drain_seconds must be positive",
-            ));
-        }
-        Ok(())
+        self.log.validate(SERVICE)
     }
 }

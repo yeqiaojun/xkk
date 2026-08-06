@@ -256,13 +256,9 @@ struct LoginResult {
 }
 
 pub(crate) fn persistence(
-    mongo: xmongo::Client,
-    database: String,
-    collection_name: String,
+    collection: xmongo::Collection<xmongo::mongodb::bson::Document>,
     metrics: Arc<LoginMetrics>,
 ) -> Persistence<PlayerState, PlayerError> {
-    let collection =
-        mongo.collection::<xmongo::mongodb::bson::Document>(&database, &collection_name);
     let load_collection = collection.clone();
     let load_metrics = metrics;
     Persistence::new(
@@ -318,7 +314,7 @@ pub(crate) fn register_handlers(
     let login_redis = redis.clone();
     let login_online = online_count.clone();
     let login_stats = login_metrics;
-    rpc.register_typed::<pb::LogicLoginReq, _, _>(move |ctx, request| {
+    rpc.register::<pb::LogicLoginReq, _, _>(move |ctx, request| {
             let runtime = login_runtime.clone();
             let frame = login_frame.clone();
             let redis = login_redis.clone();
@@ -360,7 +356,7 @@ pub(crate) fn register_handlers(
                                     reason: "session replaced".to_string(),
                                 };
                                 if let Err(error) = kick_frame
-                                    .call_player_to_typed(
+                                    .call_player_to(
                                         ServiceType::Gate,
                                         old.gate_id,
                                         gid,
@@ -441,7 +437,7 @@ pub(crate) fn register_handlers(
     })?;
 
     let player_runtime = runtime.clone();
-    rpc.register_typed::<pb::PlayerInfoReq, _, _>(move |ctx, _request| {
+    rpc.register::<pb::PlayerInfoReq, _, _>(move |ctx, _request| {
         let runtime = player_runtime.clone();
         async move {
             let Some(gid) = valid_context_gid(&ctx) else {
@@ -463,7 +459,7 @@ pub(crate) fn register_handlers(
     })?;
 
     let use_runtime = runtime.clone();
-    rpc.register_typed::<pb::UseItemReq, _, _>(move |ctx, request| {
+    rpc.register::<pb::UseItemReq, _, _>(move |ctx, request| {
         let runtime = use_runtime.clone();
         async move {
             let Some(gid) = valid_context_gid(&ctx) else {
@@ -497,7 +493,7 @@ fn register_item_handlers(
     runtime: LogicRuntime<PlayerState, PlayerError>,
 ) -> xframe::xrpc::Result<()> {
     let add_runtime = runtime.clone();
-    rpc.register_typed::<pb::AddItemsReq, _, _>(move |ctx, request| {
+    rpc.register::<pb::AddItemsReq, _, _>(move |ctx, request| {
         let runtime = add_runtime.clone();
         async move {
             let gid = request.gid;
@@ -529,7 +525,7 @@ fn register_item_handlers(
     })?;
 
     let remove_runtime = runtime.clone();
-    rpc.register_typed::<pb::RemoveItemsReq, _, _>(move |ctx, request| {
+    rpc.register::<pb::RemoveItemsReq, _, _>(move |ctx, request| {
         let runtime = remove_runtime.clone();
         async move {
             let gid = request.gid;
@@ -561,7 +557,7 @@ fn register_item_handlers(
     })?;
 
     let check_runtime = runtime;
-    rpc.register_typed::<pb::CheckItemsReq, _, _>(move |ctx, request| {
+    rpc.register::<pb::CheckItemsReq, _, _>(move |ctx, request| {
         let runtime = check_runtime.clone();
         async move {
             let gid = request.gid;

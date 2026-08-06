@@ -1,11 +1,11 @@
 # Protocol Tools
 
-These Windows binaries are checked in so protocol generation does not depend on a sibling
-`deps-rust` checkout or a network download:
+These legacy Windows binaries are retained only for compatibility with older development
+environments:
 
-- `protoc.exe` compiles protobuf descriptors and is used by `prost-build`.
-- `protoc-gen-xmongo-trait.exe` generates the xmongo BSON implementations.
+- `protoc.exe` is an old Windows protobuf compiler.
+- `protoc-gen-xmongo-trait.exe` is an old Windows xmongo generator.
 - `protoc-gen-go-grpc.exe` is retained for future Go gRPC generation and is not currently invoked.
 
-`protocol/build.rs` and `scripts/gen-proto.sh` must use these local binaries directly. Do not fall
-back to `PATH`.
+Current Cargo builds and generation scripts do not execute these files. They resolve a host-native
+compiler through `protoc-bin-vendored` and call the shared xmongo generator as a Rust library.
