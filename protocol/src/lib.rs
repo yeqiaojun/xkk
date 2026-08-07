@@ -3,9 +3,9 @@ mod registry;
 mod status;
 
 pub mod pb {
-    include!(concat!(env!("OUT_DIR"), "/xkk.v1.rs"));
-    include!(concat!(env!("OUT_DIR"), "/xkk.xmongo.rs"));
-    include!(concat!(env!("OUT_DIR"), "/model.xmongo.rs"));
+    include!("../generated/xkk.v1.rs");
+    include!("../generated/xkk.xmongo.rs");
+    include!("../generated/model.xmongo.rs");
 }
 
 pub use message::{

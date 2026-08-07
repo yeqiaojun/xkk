@@ -3,7 +3,7 @@ use xproto::MessageRegistry;
 
 use crate::pb;
 
-include!(concat!(env!("OUT_DIR"), "/xkk.registry.rs"));
+include!("../generated/xkk.registry.rs");
 
 #[derive(Debug, Error)]
 pub enum ProtocolError {

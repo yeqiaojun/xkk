@@ -3771,6 +3771,7 @@ dependencies = [
  "xredis",
  "xrpc",
  "xservice",
+ "xtime",
 ]
 
 [[package]]
@@ -4076,6 +4077,7 @@ name = "xtime"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "tokio",
 ]
 
 [[package]]
