@@ -212,9 +212,8 @@ where
         },
         body,
     )?;
-    if !conn.send_flush(payload) {
-        return Err(SmokeError(format!("Gate send rejected for {msgid:?}")).into());
-    }
+    conn.send(payload)
+        .map_err(|error| SmokeError(format!("Gate send rejected for {msgid:?}: {error}")))?;
     Ok(())
 }
 

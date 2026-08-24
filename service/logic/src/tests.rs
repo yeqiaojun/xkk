@@ -5,7 +5,7 @@ use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
 use tokio::sync::Semaphore;
-use tokio::time::{Instant, timeout};
+use tokio::time::timeout;
 use xkk_common::LatencyRecorder;
 use xmongo::mongodb::{
     bson::{Bson, Document},
@@ -175,7 +175,7 @@ async fn same_gid_is_strictly_serial() {
     wait_until(|| runtime.stats().active_gids == 0).await;
     assert_eq!(runtime.stats().cache.set_calls, 1);
 
-    runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    runtime.shutdown().await.unwrap();
     assert_eq!(stored.lock().unwrap().get(&7), Some(&32));
     assert_eq!(loads.lock().unwrap().get(&7), Some(&1));
     let stats = runtime.stats();
@@ -221,7 +221,7 @@ async fn unrelated_gids_run_in_parallel() {
     .expect("different gids were head-of-line blocked");
     assert_eq!(first.unwrap().value, 1);
     assert_eq!(second.unwrap().value, 2);
-    runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -255,7 +255,7 @@ async fn global_call_admission_rejects_immediately() {
     ));
     release.store(true, Ordering::Release);
     first.await.unwrap();
-    runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    runtime.shutdown().await.unwrap();
     assert_eq!(runtime.stats().rejected_calls, 1);
 }
 
@@ -289,7 +289,7 @@ async fn global_kib_and_per_gid_admission_are_bounded() {
     ));
     release.store(true, Ordering::Release);
     first.await.unwrap();
-    kib_runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    kib_runtime.shutdown().await.unwrap();
     assert_eq!(kib_runtime.stats().rejected_kib, 1);
 
     let mut gid_config = test_config();
@@ -320,7 +320,7 @@ async fn global_kib_and_per_gid_admission_are_bounded() {
     ));
     release.store(true, Ordering::Release);
     first.await.unwrap();
-    gid_runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    gid_runtime.shutdown().await.unwrap();
     assert_eq!(gid_runtime.stats().rejected_gid, 1);
 }
 
@@ -372,7 +372,7 @@ async fn dirty_player_capacity_rejects_before_mutation() {
     assert_eq!(stats.rejected_dirty, 1);
 
     allow_save.store(true, Ordering::Release);
-    runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    runtime.shutdown().await.unwrap();
     assert_eq!(runtime.stats().dirty_players, 0);
     assert_eq!(runtime.stats().dirty_slots, 0);
 }
@@ -433,7 +433,7 @@ async fn preload_is_async_outside_the_player_lock_but_inside_gid_serialization()
     assert_eq!(first.await.unwrap().value, 42);
     second.await.unwrap();
     assert!(second_ran.load(Ordering::Acquire));
-    runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -462,7 +462,7 @@ async fn preload_failure_skips_business_logic() {
     let stats = runtime.stats();
     assert_eq!(stats.preload_calls, 1);
     assert_eq!(stats.preload_failed, 1);
-    runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -483,7 +483,7 @@ async fn dropping_the_call_does_not_cancel_accepted_logic() {
         .unwrap();
     drop(call);
 
-    runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    runtime.shutdown().await.unwrap();
     assert!(executed.load(Ordering::Acquire));
     assert_eq!(stored.lock().unwrap().get(&9), Some(&99));
     assert_eq!(runtime.stats().completed, 1);
@@ -531,7 +531,7 @@ async fn capacity_one_keeps_one_active_generation_and_all_writes() {
     .await
     .unwrap();
 
-    runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    runtime.shutdown().await.unwrap();
     assert_eq!(loads.lock().unwrap().get(&1), Some(&1));
     assert_eq!(stored.lock().unwrap().get(&1), Some(&2));
 }
@@ -593,7 +593,7 @@ async fn save_gate_covers_logic_and_save_without_holding_player_mutex() {
     first.await.unwrap();
     second.await.unwrap();
     assert!(second_ran.load(Ordering::Acquire));
-    runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    runtime.shutdown().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -628,7 +628,7 @@ async fn save_failure_is_separate_from_the_business_value() {
     wait_until(|| runtime.stats().active_gids == 0).await;
     assert_eq!(attempts.load(Ordering::Acquire), 1);
 
-    runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    runtime.shutdown().await.unwrap();
     assert_eq!(attempts.load(Ordering::Acquire), 2);
     assert_eq!(runtime.stats().dirty_players, 0);
 }
@@ -688,7 +688,7 @@ async fn xmongo_prepared_save_retries_an_unacknowledged_failure() {
 
     assert!(completed.persistence.is_err());
     assert_eq!(runtime.stats().dirty_players, 1);
-    runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    runtime.shutdown().await.unwrap();
     assert_eq!(attempts.load(Ordering::Acquire), 2);
     assert_eq!(runtime.stats().dirty_players, 0);
 }
@@ -702,7 +702,7 @@ async fn load_failure_completes_the_accepted_call() {
     let runtime = LogicRuntime::new(test_config(), persistence);
     let error = runtime.try_use(1, 1, |_| ()).unwrap().await.unwrap_err();
     assert!(matches!(error, LogicCallError::Load(_)));
-    runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    runtime.shutdown().await.unwrap();
     let stats = runtime.stats();
     assert_eq!(stats.load_failed, 1);
     assert_eq!(stats.accepted, 1);
@@ -710,7 +710,7 @@ async fn load_failure_completes_the_accepted_call() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn shutdown_times_out_then_retries_the_same_drain() {
+async fn shutdown_waits_for_the_same_drain_without_an_internal_timeout() {
     let runtime = LogicRuntime::new(
         test_config(),
         memory_persistence(
@@ -732,12 +732,13 @@ async fn shutdown_times_out_then_retries_the_same_drain() {
         .unwrap();
     wait_until(|| started.load(Ordering::Acquire)).await;
 
-    let started_shutdown = Instant::now();
-    assert!(matches!(
-        runtime.shutdown(Duration::from_millis(20)).await,
-        Err(ShutdownError::Timeout)
-    ));
-    assert!(started_shutdown.elapsed() >= Duration::from_millis(15));
+    let shutdown = runtime.shutdown();
+    tokio::pin!(shutdown);
+    assert!(
+        timeout(Duration::from_millis(20), &mut shutdown)
+            .await
+            .is_err()
+    );
     assert_eq!(runtime.state(), RuntimeState::Draining);
     assert!(matches!(
         runtime.try_use(2, 1, |_| ()),
@@ -746,7 +747,7 @@ async fn shutdown_times_out_then_retries_the_same_drain() {
 
     release.store(true, Ordering::Release);
     call.await.unwrap();
-    runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    shutdown.await.unwrap();
     assert_eq!(runtime.state(), RuntimeState::Stopped);
     assert_eq!(runtime.stats().rejected_draining, 1);
 }
@@ -780,12 +781,12 @@ async fn shutdown_save_failure_remains_retryable() {
     assert_eq!(attempts.load(Ordering::Acquire), 1);
 
     assert!(matches!(
-        runtime.shutdown(Duration::from_secs(2)).await,
+        runtime.shutdown().await,
         Err(ShutdownError::Persistence(_))
     ));
     assert_eq!(attempts.load(Ordering::Acquire), 2);
     assert_eq!(runtime.state(), RuntimeState::Draining);
-    runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    runtime.shutdown().await.unwrap();
     assert_eq!(runtime.state(), RuntimeState::Stopped);
     assert_eq!(attempts.load(Ordering::Acquire), 3);
 }
@@ -821,7 +822,7 @@ async fn shutdown_uses_the_optional_batch_saver() {
         .unwrap();
     assert!(completed.persistence.is_err());
 
-    runtime.shutdown(Duration::from_secs(2)).await.unwrap();
+    runtime.shutdown().await.unwrap();
     assert_eq!(single_calls.load(Ordering::Relaxed), 1);
     assert_eq!(batch_calls.load(Ordering::Relaxed), 1);
     let stats = runtime.stats();

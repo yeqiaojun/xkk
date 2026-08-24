@@ -203,9 +203,9 @@ where
         body,
     )
     .map_err(|error| failure(format!("encode {msgid:?}: {error}")))?;
-    if !connection.send_flush(payload) {
-        return Err(failure(format!("Gate send rejected for {msgid:?}")));
-    }
+    connection
+        .send(payload)
+        .map_err(|error| failure(format!("Gate send rejected for {msgid:?}: {error}")))?;
     Ok(())
 }
 

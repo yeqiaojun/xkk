@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::env;
 use std::hint::black_box;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use xkk_logic::{LogicConfig, LogicRuntime, LogicState, Persistence};
 
@@ -85,7 +85,7 @@ async fn run() {
         operations as f64 / elapsed.as_secs_f64(),
     );
 
-    runtime.shutdown(Duration::from_secs(10)).await.unwrap();
+    runtime.shutdown().await.unwrap();
     let final_stats = runtime.stats();
     assert_eq!(final_stats.inflight_calls, 0);
     assert_eq!(final_stats.queued, 0);

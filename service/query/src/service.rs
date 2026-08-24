@@ -4,7 +4,7 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 use xframe::{
     Application, ApplicationResult, DiscoveryConfig, FrameConfig, FrameHandle, FrameState,
-    HttpServerConfig, NodeConfig, RpcConfig, ServiceType, ShutdownConfig,
+    HttpServerConfig, NodeConfig, RpcConfig, ServiceType,
 };
 use xkk_protocol::pb;
 
@@ -16,7 +16,6 @@ pub use xkk_config::QueryConfig as Config;
 // vary by deployment; overload is rejected and reported at error level.
 const RPC_PENDING_CAPACITY: usize = 100_000;
 const HTTP_MAX_BODY_BYTES: usize = 8_192;
-const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const METRICS_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Error)]
@@ -70,8 +69,7 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
             "{}:{}",
             config.node.listen_host, config.node.http_port
         ))?)
-        .with_rpc(RpcConfig::new(RPC_PENDING_CAPACITY)?)
-        .with_shutdown(ShutdownConfig::new(SHUTDOWN_DRAIN_TIMEOUT)?))
+        .with_rpc(RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)))
 }
 
 pub fn config_path() -> Result<PathBuf, ServiceError> {
@@ -217,7 +215,10 @@ mod tests {
 
         assert!(frame.http.is_some());
         assert!(frame.service_server.is_none());
-        assert_eq!(frame.rpc.pending_capacity(), RPC_PENDING_CAPACITY);
+        assert_eq!(
+            frame.rpc,
+            RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)
+        );
         assert_eq!(frame.node.meta_data().get("protocol").unwrap(), "http");
     }
 }

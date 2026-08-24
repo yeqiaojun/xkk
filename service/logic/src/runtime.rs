@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 
 use tokio::runtime::Handle;
 use tokio::sync::{Mutex as AsyncMutex, Notify, oneshot};
-use tokio::time::{Instant as TokioInstant, timeout_at};
 use xlru::{CacheValue, Error as CacheError, Options, XlruCache};
 
 use crate::persistence::{BoxFuture, LogicState, Persistence, SavePlayer};
@@ -59,16 +58,19 @@ impl<E> std::error::Error for LogicCallError<E> where E: std::error::Error + 'st
 
 #[derive(Debug)]
 pub enum ShutdownError<E> {
-    Timeout,
     Persistence(Arc<E>),
+    PendingBudgetExceeded { capacity: usize },
     DirtyPlayers(u64),
 }
 
 impl<E: fmt::Display> fmt::Display for ShutdownError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Timeout => f.write_str("logic runtime shutdown timed out"),
             Self::Persistence(error) => write!(f, "logic runtime flush failed: {error}"),
+            Self::PendingBudgetExceeded { capacity } => write!(
+                f,
+                "logic runtime flush pending-entry budget exceeded (capacity {capacity})"
+            ),
             Self::DirtyPlayers(count) => {
                 write!(f, "logic runtime flush left {count} dirty players")
             }
@@ -771,8 +773,8 @@ where
         self.inner.stats()
     }
 
-    pub async fn shutdown(&self, timeout: Duration) -> Result<(), ShutdownError<E>> {
-        self.inner.shutdown(timeout).await
+    pub async fn shutdown(&self) -> Result<(), ShutdownError<E>> {
+        self.inner.shutdown().await
     }
 }
 
@@ -1170,7 +1172,7 @@ where
         }
     }
 
-    async fn shutdown(&self, timeout: Duration) -> Result<(), ShutdownError<E>> {
+    async fn shutdown(&self) -> Result<(), ShutdownError<E>> {
         if self.state() == RuntimeState::Stopped {
             return Ok(());
         }
@@ -1184,7 +1186,6 @@ where
             )
             .ok();
 
-        let deadline = TokioInstant::now() + timeout;
         loop {
             let drained = self.admission.inflight_calls() == 0
                 && self.stats.active_gids.load(Ordering::Acquire) == 0;
@@ -1197,23 +1198,23 @@ where
             if drained {
                 break;
             }
-            timeout_at(deadline, notified)
-                .await
-                .map_err(|_| ShutdownError::Timeout)?;
+            notified.await;
         }
 
         let flush_started = Instant::now();
-        let flushed = timeout_at(deadline, self.cache.flush()).await;
+        let flushed = self.cache.flush().await;
         self.stats.flush_latency.record(flush_started.elapsed());
         match flushed {
-            Err(_) => return Err(ShutdownError::Timeout),
-            Ok(Err(CacheError::Save(error) | CacheError::Load(error))) => {
+            Err(CacheError::Save(error) | CacheError::Load(error)) => {
                 return Err(ShutdownError::Persistence(error));
             }
-            Ok(Err(CacheError::MissingLoader | CacheError::MissingSaver)) => {
+            Err(CacheError::PendingBudgetExceeded { capacity }) => {
+                return Err(ShutdownError::PendingBudgetExceeded { capacity });
+            }
+            Err(CacheError::MissingLoader | CacheError::MissingSaver) => {
                 unreachable!("logic runtime cache persistence callbacks are always configured");
             }
-            Ok(Ok(())) => {}
+            Ok(()) => {}
         }
 
         let dirty = self
@@ -1259,6 +1260,7 @@ fn map_cache_error<E>(error: CacheError<E>) -> LogicCallError<E> {
     match error {
         CacheError::Load(error) => LogicCallError::Load(error),
         CacheError::Save(error) => LogicCallError::Persistence(error),
+        CacheError::PendingBudgetExceeded { .. } => LogicCallError::DirtyCapacity,
         CacheError::MissingLoader | CacheError::MissingSaver => {
             unreachable!("logic runtime cache persistence callbacks are always configured")
         }

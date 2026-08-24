@@ -10,7 +10,7 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 use xframe::{
     Application, ApplicationResult, DiscoveryConfig, FrameConfig, FrameHandle, NodeConfig,
-    RpcConfig, ServiceType, ShutdownConfig,
+    RpcConfig, ServiceType,
 };
 use xkk_cache::{
     delete_service_online, load_service_online_counts, publish_service_online, service_online_ttl,
@@ -24,11 +24,9 @@ pub use xkk_config::GateConfig as Config;
 
 // One Gate process has fixed transport and lifecycle budgets. Reaching these bounds rejects new
 // work and is surfaced by the event path or the periodic overload counters below.
-const SERVICE_WRITE_QUEUE_CAPACITY: usize = 1_024;
 const MAX_EXTERNAL_HANDSHAKES: usize = 256;
 const MAX_EXTERNAL_CONNECTIONS: usize = 65_536;
 const RPC_PENDING_CAPACITY: usize = 100_000;
-const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVICE_LOAD_PUBLISH_INTERVAL: Duration = Duration::from_secs(3);
 const LOGIC_LOAD_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const METRICS_REPORT_INTERVAL: Duration = Duration::from_secs(10);
@@ -77,7 +75,6 @@ fn network_server(config: &Config) -> xframe::xnet::ServerConfig {
     }
 
     let transport = xframe::xnet::TransportOptions::default()
-        .with_write_queue_capacity(SERVICE_WRITE_QUEUE_CAPACITY)
         .with_websocket_path(&config.listeners.websocket_path);
     xframe::xnet::ServerConfig::new(listeners)
         .with_role(xframe::xnet::ConnectionRole::client())
@@ -123,20 +120,15 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
     .with_versions(config.version.program, config.version.conf)
     .with_meta_data(metadata);
     let discovery = DiscoveryConfig::new(&config.infrastructure.etcd_dsn)?;
-    let service_transport = xframe::xnet::TransportOptions::default()
-        .with_write_queue_capacity(SERVICE_WRITE_QUEUE_CAPACITY);
-
     Ok(FrameConfig::new(node)
         .with_discovery(discovery)
-        .with_service_client_transport(service_transport)
         .with_mongo(xframe::xmongo::Config::new(
             &config.infrastructure.mongo_dsn,
         )?)
         .with_redis(xframe::xredis::RedisConfig::new(
             &config.infrastructure.redis_dsn,
         )?)
-        .with_rpc(RpcConfig::new(RPC_PENDING_CAPACITY)?)
-        .with_shutdown(ShutdownConfig::new(SHUTDOWN_DRAIN_TIMEOUT)?))
+        .with_rpc(RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)))
 }
 
 fn gateway_settings(config: &Config) -> GatewaySettings {
@@ -253,12 +245,8 @@ impl GateApplication {
 
 impl Application for GateApplication {
     async fn start(&mut self, frame: FrameHandle) -> ApplicationResult {
-        frame
-            .watch_and_connect(self.cluster.clone(), ServiceType::Logic)
-            .await?;
-        frame
-            .watch_and_connect(self.cluster.clone(), ServiceType::Public)
-            .await?;
+        frame.watch_and_connect(ServiceType::Logic).await?;
+        frame.watch_and_connect(ServiceType::Public).await?;
         publish_service_online(
             &self.redis,
             &self.cluster,
@@ -440,7 +428,8 @@ fn spawn_metrics(
                 tracing::error!(
                     rejected = write_queue_rejected - last_write_queue_rejected,
                     total_rejected = write_queue_rejected,
-                    limit = SERVICE_WRITE_QUEUE_CAPACITY,
+                    external_limit = xframe::xnet::DEFAULT_EXTERNAL_WRITE_QUEUE_CAPACITY,
+                    internal_limit = xframe::xnet::DEFAULT_INTERNAL_WRITE_QUEUE_CAPACITY,
                     "Gate write queue hard limit exceeded"
                 );
                 last_write_queue_rejected = write_queue_rejected;
@@ -511,13 +500,20 @@ mod tests {
         let server = network_server(&config);
 
         assert_eq!(server.listeners.len(), 3);
+        assert!(
+            server
+                .listeners
+                .iter()
+                .all(|listener| listener.is_external())
+        );
         assert!(frame.service_server.is_none());
         assert_eq!(frame.node.port(), 3201);
-        assert_eq!(frame.rpc.pending_capacity(), RPC_PENDING_CAPACITY);
         assert_eq!(
-            frame.service_client_transport.write_queue_capacity,
-            SERVICE_WRITE_QUEUE_CAPACITY
+            frame.rpc,
+            RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)
         );
+        assert_eq!(server.transport.write_queue_capacity, 0);
+        assert_eq!(frame.service_client_transport.write_queue_capacity, 0);
         assert_eq!(
             frame.node.meta_data().get("primary_transport").unwrap(),
             "tcp"

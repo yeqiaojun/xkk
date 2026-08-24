@@ -13,7 +13,7 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 use xframe::{
     Application, ApplicationResult, DiscoveryConfig, FrameConfig, FrameHandle, NodeConfig,
-    RpcConfig, ServiceType, ShutdownConfig,
+    RpcConfig, ServiceType,
 };
 use xkk_cache::{delete_service_online, publish_service_online, service_online_ttl};
 
@@ -22,10 +22,8 @@ pub use xkk_config::LogicConfig as Config;
 
 // These limits are product/runtime invariants. Keep them next to the Logic
 // composition that consumes them; changing one requires code review and a build.
-const SERVICE_WRITE_QUEUE_CAPACITY: usize = 1_024;
 const RPC_PENDING_CAPACITY: usize = 100_000;
 const RPC_CALL_TIMEOUT: Duration = Duration::from_secs(3);
-const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const SERVICE_LOAD_PUBLISH_INTERVAL: Duration = Duration::from_secs(3);
 const METRICS_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -63,16 +61,12 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
     .with_versions(config.version.program, config.version.conf)
     .with_meta_data(metadata);
     let discovery = DiscoveryConfig::new(&config.infrastructure.etcd_dsn)?;
-    let transport = xframe::xnet::TransportOptions::default()
-        .with_write_queue_capacity(SERVICE_WRITE_QUEUE_CAPACITY);
     let listener = xframe::xnet::ServerConfig::with_listener(xframe::xnet::ListenEndpoint::tcp(
         format!("{}:{}", config.node.listen_host, config.node.service_port),
-    ))
-    .with_transport(transport.clone());
+    ));
 
     Ok(FrameConfig::new(node)
         .with_discovery(discovery)
-        .with_service_client_transport(transport)
         .with_service_server(listener)
         .with_mongo(xframe::xmongo::Config::new(
             &config.infrastructure.mongo_dsn,
@@ -80,8 +74,7 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
         .with_redis(xframe::xredis::RedisConfig::new(
             &config.infrastructure.redis_dsn,
         )?)
-        .with_rpc(RpcConfig::new(RPC_PENDING_CAPACITY)?)
-        .with_shutdown(ShutdownConfig::new(SHUTDOWN_DRAIN_TIMEOUT)?))
+        .with_rpc(RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)))
 }
 
 fn logic_config() -> LogicConfig {
@@ -136,7 +129,6 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
                 redis: application_redis,
                 service_load_interval: SERVICE_LOAD_PUBLISH_INTERVAL,
                 metrics_interval: METRICS_REPORT_INTERVAL,
-                shutdown_timeout: SHUTDOWN_DRAIN_TIMEOUT,
                 logic_config,
                 runtime,
                 online_count,
@@ -168,7 +160,6 @@ struct LogicApplication {
     redis: xframe::xredis::Client,
     service_load_interval: Duration,
     metrics_interval: Duration,
-    shutdown_timeout: Duration,
     logic_config: LogicConfig,
     runtime: LogicRuntime<player::PlayerState, player::PlayerError>,
     online_count: Arc<AtomicI32>,
@@ -179,10 +170,8 @@ struct LogicApplication {
 
 impl Application for LogicApplication {
     async fn start(&mut self, frame: FrameHandle) -> ApplicationResult {
-        frame.watch(self.cluster.clone(), ServiceType::Gate).await?;
-        frame
-            .watch_and_connect(self.cluster.clone(), ServiceType::Public)
-            .await?;
+        frame.watch(ServiceType::Gate).await?;
+        frame.watch_and_connect(ServiceType::Public).await?;
         let online_count = self.online_count.load(Ordering::Acquire);
         publish_service_online(
             &self.redis,
@@ -231,7 +220,7 @@ impl Application for LogicApplication {
         }
         stop_task(&mut self.metrics_task, "Logic metrics").await;
         self.runtime
-            .shutdown(self.shutdown_timeout)
+            .shutdown()
             .await
             .map_err(|error| Box::new(error) as xframe::ApplicationError)?;
         let logic = self.runtime.stats();
@@ -335,7 +324,7 @@ fn spawn_metrics(
                 tracing::error!(
                     rejected = write_queue_rejected - last_write_queue_rejected,
                     total_rejected = write_queue_rejected,
-                    limit = SERVICE_WRITE_QUEUE_CAPACITY,
+                    limit = xframe::xnet::DEFAULT_INTERNAL_WRITE_QUEUE_CAPACITY,
                     "Logic write queue hard limit exceeded"
                 );
                 last_write_queue_rejected = write_queue_rejected;
@@ -440,12 +429,19 @@ mod config_tests {
         assert_eq!(logic.max_calls_per_gid, 64);
         assert_eq!(logic.shards, 128);
         assert_eq!(config.version.conf, 0);
-        assert_eq!(frame.rpc.pending_capacity(), RPC_PENDING_CAPACITY);
         assert_eq!(
-            frame.service_client_transport.write_queue_capacity,
-            SERVICE_WRITE_QUEUE_CAPACITY
+            frame.rpc,
+            RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)
         );
-        assert!(frame.service_server.is_some());
+        assert_eq!(frame.service_client_transport.write_queue_capacity, 0);
+        let server = frame.service_server.as_ref().unwrap();
+        assert_eq!(server.transport.write_queue_capacity, 0);
+        assert!(
+            server
+                .listeners
+                .iter()
+                .all(|listener| !listener.is_external())
+        );
         assert_eq!(frame.node.meta_data().get("protocol").unwrap(), "ss");
     }
 }

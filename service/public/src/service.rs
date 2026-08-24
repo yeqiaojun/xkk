@@ -4,7 +4,7 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 use xframe::{
     Application, ApplicationResult, DiscoveryConfig, FrameConfig, FrameHandle, NodeConfig,
-    RpcConfig, ServiceType, ShutdownConfig,
+    RpcConfig, ServiceType,
 };
 use xkk_persist::PublicPlayers;
 
@@ -14,9 +14,7 @@ pub use xkk_config::PublicConfig as Config;
 
 // Public's stable process budgets are code-level invariants, not deployment
 // knobs. Saturation is surfaced by the metrics task as an error.
-const SERVICE_WRITE_QUEUE_CAPACITY: usize = 1_024;
 const RPC_PENDING_CAPACITY: usize = 100_000;
-const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const METRICS_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 const PLAYER_SAVE_INTERVAL: Duration = Duration::from_secs(2 * 60);
 
@@ -56,11 +54,7 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
     let discovery = DiscoveryConfig::new(&config.infrastructure.etcd_dsn)?;
     let listener = xframe::xnet::ServerConfig::with_listener(xframe::xnet::ListenEndpoint::tcp(
         format!("{}:{}", config.node.listen_host, config.node.service_port),
-    ))
-    .with_transport(
-        xframe::xnet::TransportOptions::default()
-            .with_write_queue_capacity(SERVICE_WRITE_QUEUE_CAPACITY),
-    );
+    ));
 
     Ok(FrameConfig::new(node)
         .with_discovery(discovery)
@@ -71,8 +65,7 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
         .with_redis(xframe::xredis::RedisConfig::new(
             &config.infrastructure.redis_dsn,
         )?)
-        .with_rpc(RpcConfig::new(RPC_PENDING_CAPACITY)?)
-        .with_shutdown(ShutdownConfig::new(SHUTDOWN_DRAIN_TIMEOUT)?))
+        .with_rpc(RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)))
 }
 
 pub fn config_path() -> Result<PathBuf, ServiceError> {
@@ -83,7 +76,6 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
     config.validate()?;
     let log_options = config.log.options("logs/public.log");
     let frame_config = frame_config(&config)?;
-    let cluster = config.node.cluster.clone();
     let instance_id = config.node.instance_id;
     let log_guard = xlog::init_global(log_options)?;
 
@@ -102,11 +94,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
         let mail = MailService::new(handle, redis, players.clone());
         mail.register_handlers(prepared.rpc())?;
         let frame = prepared
-            .start(PublicApplication::new(
-                cluster,
-                players,
-                METRICS_REPORT_INTERVAL,
-            ))
+            .start(PublicApplication::new(players, METRICS_REPORT_INTERVAL))
             .await?;
         tracing::info!(instance_id, "Public service started");
         let shutdown = frame.run_until_shutdown_signal().await;
@@ -126,7 +114,6 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
 }
 
 struct PublicApplication {
-    cluster: String,
     players: PublicPlayers,
     metrics_interval: Duration,
     save_task: Option<JoinHandle<()>>,
@@ -134,9 +121,8 @@ struct PublicApplication {
 }
 
 impl PublicApplication {
-    fn new(cluster: String, players: PublicPlayers, metrics_interval: Duration) -> Self {
+    fn new(players: PublicPlayers, metrics_interval: Duration) -> Self {
         Self {
-            cluster,
             players,
             metrics_interval,
             save_task: None,
@@ -147,10 +133,8 @@ impl PublicApplication {
 
 impl Application for PublicApplication {
     async fn start(&mut self, frame: FrameHandle) -> ApplicationResult {
-        frame.watch(self.cluster.clone(), ServiceType::Gate).await?;
-        frame
-            .watch(self.cluster.clone(), ServiceType::Logic)
-            .await?;
+        frame.watch(ServiceType::Gate).await?;
+        frame.watch(ServiceType::Logic).await?;
         self.save_task = Some(spawn_player_save(
             self.players.clone(),
             PLAYER_SAVE_INTERVAL,
@@ -236,7 +220,7 @@ fn spawn_metrics(
                 tracing::error!(
                     rejected = write_queue_rejected - last_write_queue_rejected,
                     total_rejected = write_queue_rejected,
-                    limit = SERVICE_WRITE_QUEUE_CAPACITY,
+                    limit = xframe::xnet::DEFAULT_INTERNAL_WRITE_QUEUE_CAPACITY,
                     "Public write queue hard limit exceeded"
                 );
                 last_write_queue_rejected = write_queue_rejected;
@@ -291,9 +275,19 @@ mod tests {
         .unwrap();
         let frame = frame_config(&config).unwrap();
 
-        assert!(frame.service_server.is_some());
+        let server = frame.service_server.as_ref().unwrap();
+        assert_eq!(server.transport.write_queue_capacity, 0);
+        assert!(
+            server
+                .listeners
+                .iter()
+                .all(|listener| !listener.is_external())
+        );
         assert!(frame.http.is_none());
-        assert_eq!(frame.rpc.pending_capacity(), RPC_PENDING_CAPACITY);
+        assert_eq!(
+            frame.rpc,
+            RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)
+        );
         assert_eq!(frame.node.meta_data().get("protocol").unwrap(), "ss");
     }
 }

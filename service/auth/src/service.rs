@@ -4,7 +4,7 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 use xframe::{
     Application, ApplicationResult, DiscoveryConfig, FrameConfig, FrameHandle, FrameState,
-    HttpServerConfig, NodeConfig, RpcConfig, ServiceType, ShutdownConfig, xmongo,
+    HttpServerConfig, NodeConfig, RpcConfig, ServiceType, xmongo,
 };
 use xkk_cache::load_service_online_counts;
 use xkk_protocol::pb;
@@ -16,7 +16,6 @@ pub use xkk_config::AuthConfig as Config;
 // emits an error log; operators scale the role instead of changing per-instance YAML.
 const RPC_PENDING_CAPACITY: usize = 1_024;
 const HTTP_MAX_BODY_BYTES: usize = 4_096;
-const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const GATE_LOAD_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 const METRICS_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 
@@ -68,8 +67,7 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
             "{}:{}",
             config.node.listen_host, config.node.http_port
         ))?)
-        .with_rpc(RpcConfig::new(RPC_PENDING_CAPACITY)?)
-        .with_shutdown(ShutdownConfig::new(SHUTDOWN_DRAIN_TIMEOUT)?))
+        .with_rpc(RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)))
 }
 
 pub fn config_path() -> Result<PathBuf, ServiceError> {
@@ -180,7 +178,7 @@ impl AuthApplication {
 
 impl Application for AuthApplication {
     async fn start(&mut self, frame: FrameHandle) -> ApplicationResult {
-        frame.watch(self.cluster.clone(), ServiceType::Gate).await?;
+        frame.watch(ServiceType::Gate).await?;
         refresh_service_online(&frame, &self.redis, &self.cluster, ServiceType::Gate).await?;
         self.service_load_task = Some(spawn_service_loads(
             frame.clone(),
@@ -296,7 +294,10 @@ mod tests {
 
         assert!(frame.http.is_some());
         assert!(frame.service_server.is_none());
-        assert_eq!(frame.rpc.pending_capacity(), RPC_PENDING_CAPACITY);
+        assert_eq!(
+            frame.rpc,
+            RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)
+        );
         assert_eq!(
             frame.node.meta_data().get("login_path").unwrap(),
             LOGIN_PATH

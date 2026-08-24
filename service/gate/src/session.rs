@@ -130,6 +130,8 @@ pub(crate) enum SendError {
     SessionMismatch,
     #[error("Gate connection write queue rejected the message")]
     QueueFull,
+    #[error("Gate connection send failed: {0}")]
+    Transport(#[source] xframe::xnet::Error),
     #[error(transparent)]
     Protocol(#[from] xframe::xproto::Error),
 }
@@ -256,8 +258,10 @@ impl ClientSessions {
             .conn
             .as_ref()
             .expect("active Gate session has no connection");
-        if !conn.send_shared_flush(payload) {
-            return Err(SendError::QueueFull);
+        match conn.send_shared(payload) {
+            Ok(()) => {}
+            Err(xframe::xnet::Error::Backpressure { .. }) => return Err(SendError::QueueFull),
+            Err(error) => return Err(SendError::Transport(error)),
         }
         Ok(())
     }
@@ -297,8 +301,9 @@ impl ClientSessions {
                     Instant::now(),
                     self.config,
                 )
+                && let Err(error) = conn.send_shared(payload)
             {
-                let _ = conn.send_shared_flush(payload);
+                tracing::warn!(gid, session_id, %error, "Gate kick notification send failed");
             }
             let was_active = conn.is_some();
             (conn, was_active)

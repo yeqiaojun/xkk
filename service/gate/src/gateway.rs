@@ -803,7 +803,13 @@ impl GatewayState {
         }
 
         for payload in &reconnect.replay {
-            if !frame.conn.send_shared(payload.clone()) {
+            if let Err(error) = frame.conn.send_shared(payload.clone()) {
+                tracing::warn!(
+                    gid = request.gid,
+                    session_id = frame.session_id,
+                    %error,
+                    "Gate reconnect replay send failed"
+                );
                 self.kick_local(
                     request.gid,
                     frame.session_id,
@@ -1131,7 +1137,9 @@ impl GatewayState {
     {
         match encode_direct(msgid, ack, message) {
             Ok(payload) => {
-                let _ = conn.send_shared_flush(payload);
+                if let Err(error) = conn.send_shared(payload) {
+                    tracing::warn!(%error, msgid = msgid.as_u16(), "Gate direct response send failed");
+                }
             }
             Err(error) => {
                 tracing::error!(%error, msgid = msgid.as_u16(), "Gate response encode failed");
@@ -1156,6 +1164,9 @@ impl GatewayState {
                         msgid = msgid.as_u16(),
                         "Gate write queue full"
                     );
+                }
+                SendError::Transport(error) => {
+                    tracing::warn!(gid, session_id, msgid = msgid.as_u16(), %error, "Gate response send failed");
                 }
                 SendError::Protocol(error) => {
                     tracing::error!(gid, session_id, msgid = msgid.as_u16(), %error, "Gate response encode failed");
