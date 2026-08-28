@@ -182,7 +182,7 @@ async fn run(addr: SocketAddr, gid: i64, token: String, device_id: String) -> Re
 async fn connect(addr: SocketAddr) -> Result<(Client, Connection, mpsc::Receiver<Event>)> {
     let (events, mut receiver) = mpsc::channel(EVENT_CAPACITY);
     let client = Client::connect(
-        ClientConfig::new(ConnectEndpoint::tcp(addr)),
+        ClientConfig::new(ConnectEndpoint::tcp(addr).external()),
         EventHandler { events },
         SessionManager::new(),
         |_| true,

@@ -3773,6 +3773,7 @@ dependencies = [
  "axum",
  "bytes",
  "futures-util",
+ "http-body",
  "http-body-util",
  "hyper-util",
  "prost",
@@ -3819,6 +3820,7 @@ version = "0.1.0"
 dependencies = [
  "prost",
  "tokio",
+ "xkk-common",
  "xkk-protocol",
  "xnet",
  "xproto",
@@ -3829,6 +3831,7 @@ name = "xkk-common"
 version = "0.1.0"
 dependencies = [
  "sha2 0.10.9",
+ "xutil",
 ]
 
 [[package]]
@@ -3933,6 +3936,7 @@ dependencies = [
  "tokio",
  "tracing",
  "xframe",
+ "xkk-common",
  "xkk-config",
  "xkk-persist",
  "xkk-protocol",
@@ -3951,6 +3955,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "xkk-common",
  "xkk-config",
  "xkk-protocol",
  "xnet",

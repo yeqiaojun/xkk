@@ -49,7 +49,7 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
     ]);
     let node = NodeConfig::new(
         &config.node.cluster,
-        ServiceType::Auth,
+        xkk_common::service_type::AUTH,
         config.node.instance_id,
         &config.node.advertise_host,
         config.node.http_port,
@@ -178,8 +178,14 @@ impl AuthApplication {
 
 impl Application for AuthApplication {
     async fn start(&mut self, frame: FrameHandle) -> ApplicationResult {
-        frame.watch(ServiceType::Gate).await?;
-        refresh_service_online(&frame, &self.redis, &self.cluster, ServiceType::Gate).await?;
+        frame.watch(xkk_common::service_type::GATE).await?;
+        refresh_service_online(
+            &frame,
+            &self.redis,
+            &self.cluster,
+            xkk_common::service_type::GATE,
+        )
+        .await?;
         self.service_load_task = Some(spawn_service_loads(
             frame.clone(),
             self.redis.clone(),
@@ -227,7 +233,8 @@ fn spawn_service_loads(
         loop {
             ticker.tick().await;
             if let Err(error) =
-                refresh_service_online(&frame, &redis, &cluster, ServiceType::Gate).await
+                refresh_service_online(&frame, &redis, &cluster, xkk_common::service_type::GATE)
+                    .await
             {
                 tracing::warn!(%error, "Auth Gate online refresh failed");
             }

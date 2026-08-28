@@ -13,7 +13,7 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 use xframe::{
     Application, ApplicationResult, DiscoveryConfig, FrameConfig, FrameHandle, NodeConfig,
-    RpcConfig, ServiceType,
+    RpcConfig,
 };
 use xkk_cache::{delete_service_online, publish_service_online, service_online_ttl};
 
@@ -53,7 +53,7 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
     let metadata = HashMap::from([("protocol".to_string(), "ss".to_string())]);
     let node = NodeConfig::new(
         &config.node.cluster,
-        ServiceType::Logic,
+        xkk_common::service_type::LOGIC,
         config.node.instance_id,
         &config.node.advertise_host,
         config.node.service_port,
@@ -170,13 +170,15 @@ struct LogicApplication {
 
 impl Application for LogicApplication {
     async fn start(&mut self, frame: FrameHandle) -> ApplicationResult {
-        frame.watch(ServiceType::Gate).await?;
-        frame.watch_and_connect(ServiceType::Public).await?;
+        frame.watch(xkk_common::service_type::GATE).await?;
+        frame
+            .watch_and_connect(xkk_common::service_type::PUBLIC)
+            .await?;
         let online_count = self.online_count.load(Ordering::Acquire);
         publish_service_online(
             &self.redis,
             &self.cluster,
-            ServiceType::Logic.as_i32(),
+            xkk_common::service_type::LOGIC.as_i32(),
             self.instance_id,
             online_count,
             service_online_ttl(self.service_load_interval),
@@ -211,7 +213,7 @@ impl Application for LogicApplication {
         if let Err(error) = delete_service_online(
             &self.redis,
             &self.cluster,
-            ServiceType::Logic.as_i32(),
+            xkk_common::service_type::LOGIC.as_i32(),
             self.instance_id,
         )
         .await
@@ -255,7 +257,7 @@ fn spawn_service_online(
             if let Err(error) = publish_service_online(
                 &redis,
                 &cluster,
-                ServiceType::Logic.as_i32(),
+                xkk_common::service_type::LOGIC.as_i32(),
                 instance_id,
                 online_count,
                 ttl,

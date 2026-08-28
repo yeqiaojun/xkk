@@ -36,6 +36,7 @@ xfastid = { path = "../deps-rust/xfastid" }
 xnet = { path = "../deps-rust/xnet" }
 xproto = { path = "../deps-rust/xproto" }
 xredis = { path = "../deps-rust/xredis" }
+xutil = { path = "../deps-rust/xutil" }
 xframe = { path = "../deps-rust/xframe" }
 xlog = { path = "../deps-rust/xlog" }
 xlru = { path = "../deps-rust/xlru" }

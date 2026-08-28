@@ -1,6 +1,9 @@
 mod latency;
+mod route_identity;
+pub mod service_type;
 
 pub use latency::{LatencyRecorder, LatencyStats};
+pub use route_identity::RouteIdentity;
 
 use sha2::{Digest, Sha256};
 

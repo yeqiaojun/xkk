@@ -4,7 +4,7 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 use xframe::{
     Application, ApplicationResult, DiscoveryConfig, FrameConfig, FrameHandle, FrameState,
-    HttpServerConfig, NodeConfig, RpcConfig, ServiceType,
+    HttpServerConfig, NodeConfig, RpcConfig,
 };
 use xkk_protocol::pb;
 
@@ -48,7 +48,7 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
     ]);
     let node = NodeConfig::new(
         &config.node.cluster,
-        ServiceType::Query,
+        xkk_common::service_type::QUERY,
         config.node.instance_id,
         &config.node.advertise_host,
         config.node.http_port,

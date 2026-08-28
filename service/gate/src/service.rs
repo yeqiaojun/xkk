@@ -26,6 +26,8 @@ pub use xkk_config::GateConfig as Config;
 // work and is surfaced by the event path or the periodic overload counters below.
 const MAX_EXTERNAL_HANDSHAKES: usize = 256;
 const MAX_EXTERNAL_CONNECTIONS: usize = 65_536;
+const EXTERNAL_WRITE_QUEUE_CAPACITY: usize = 128;
+const EXTERNAL_WRITE_QUEUE_BYTES: usize = 4 * 1024 * 1024;
 const RPC_PENDING_CAPACITY: usize = 100_000;
 const SERVICE_LOAD_PUBLISH_INTERVAL: Duration = Duration::from_secs(3);
 const LOGIC_LOAD_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
@@ -62,19 +64,21 @@ fn network_server(config: &Config) -> xframe::xnet::ServerConfig {
         );
     }
     if let Some(port) = config.listeners.kcp_port {
-        listeners.push(xframe::xnet::ListenEndpoint::kcp(format!(
-            "{}:{port}",
-            config.node.listen_host
-        )));
+        listeners.push(
+            xframe::xnet::ListenEndpoint::kcp(format!("{}:{port}", config.node.listen_host))
+                .external(),
+        );
     }
     if let Some(port) = config.listeners.websocket_port {
-        listeners.push(xframe::xnet::ListenEndpoint::websocket(format!(
-            "{}:{port}",
-            config.node.listen_host
-        )));
+        listeners.push(
+            xframe::xnet::ListenEndpoint::websocket(format!("{}:{port}", config.node.listen_host))
+                .external(),
+        );
     }
 
     let transport = xframe::xnet::TransportOptions::default()
+        .with_write_queue_capacity(EXTERNAL_WRITE_QUEUE_CAPACITY)
+        .with_write_queue_byte_capacity(EXTERNAL_WRITE_QUEUE_BYTES)
         .with_websocket_path(&config.listeners.websocket_path);
     xframe::xnet::ServerConfig::new(listeners)
         .with_role(xframe::xnet::ConnectionRole::client())
@@ -112,7 +116,7 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
     }
     let node = NodeConfig::new(
         &config.node.cluster,
-        ServiceType::Gate,
+        xkk_common::service_type::GATE,
         config.node.instance_id,
         &config.node.advertise_host,
         primary_port,
@@ -245,18 +249,28 @@ impl GateApplication {
 
 impl Application for GateApplication {
     async fn start(&mut self, frame: FrameHandle) -> ApplicationResult {
-        frame.watch_and_connect(ServiceType::Logic).await?;
-        frame.watch_and_connect(ServiceType::Public).await?;
+        frame
+            .watch_and_connect(xkk_common::service_type::LOGIC)
+            .await?;
+        frame
+            .watch_and_connect(xkk_common::service_type::PUBLIC)
+            .await?;
         publish_service_online(
             &self.redis,
             &self.cluster,
-            ServiceType::Gate.as_i32(),
+            xkk_common::service_type::GATE.as_i32(),
             self.instance_id,
             self.gateway.online_count(),
             service_online_ttl(self.service_load_publish_interval),
         )
         .await?;
-        refresh_service_online(&frame, &self.redis, &self.cluster, ServiceType::Logic).await?;
+        refresh_service_online(
+            &frame,
+            &self.redis,
+            &self.cluster,
+            xkk_common::service_type::LOGIC,
+        )
+        .await?;
         self.service_load_publish_task = Some(spawn_service_online_publish(
             self.redis.clone(),
             self.cluster.clone(),
@@ -285,7 +299,7 @@ impl Application for GateApplication {
         if let Err(error) = delete_service_online(
             &self.redis,
             &self.cluster,
-            ServiceType::Gate.as_i32(),
+            xkk_common::service_type::GATE.as_i32(),
             self.instance_id,
         )
         .await
@@ -332,7 +346,7 @@ fn spawn_service_online_publish(
             if let Err(error) = publish_service_online(
                 &redis,
                 &cluster,
-                ServiceType::Gate.as_i32(),
+                xkk_common::service_type::GATE.as_i32(),
                 instance_id,
                 online_count,
                 ttl,
@@ -357,7 +371,8 @@ fn spawn_logic_online_refresh(
         loop {
             ticker.tick().await;
             if let Err(error) =
-                refresh_service_online(&frame, &redis, &cluster, ServiceType::Logic).await
+                refresh_service_online(&frame, &redis, &cluster, xkk_common::service_type::LOGIC)
+                    .await
             {
                 tracing::warn!(%error, "Gate Logic online refresh failed");
             }
@@ -512,7 +527,8 @@ mod tests {
             frame.rpc,
             RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)
         );
-        assert_eq!(server.transport.write_queue_capacity, 0);
+        assert_eq!(server.transport.write_queue_capacity, 128);
+        assert_eq!(server.transport.write_queue_byte_capacity, 4 * 1024 * 1024);
         assert_eq!(frame.service_client_transport.write_queue_capacity, 0);
         assert_eq!(
             frame.node.meta_data().get("primary_transport").unwrap(),

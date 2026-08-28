@@ -9,7 +9,7 @@ use std::{
 
 use prost::Message;
 use thiserror::Error;
-use xframe::{FrameHandle, ServiceType, xrpc::RpcManager};
+use xframe::{FrameHandle, xrpc::RpcManager};
 use xkk_cache::set_logic_owner;
 use xkk_persist::PlayerStore;
 use xkk_protocol::{code, error_status, ok_status, pb};
@@ -355,12 +355,17 @@ pub(crate) fn register_handlers(
                                     code: code::SESSION_REPLACED,
                                     reason: "session replaced".to_string(),
                                 };
+                                let route = xkk_common::RouteIdentity::from_signed(
+                                    gid,
+                                    old.session_id,
+                                )
+                                .expect("stored player route is positive");
                                 if let Err(error) = kick_frame
-                                    .call_player_to(
-                                        ServiceType::Gate,
+                                    .call_routed_to(
+                                        xkk_common::service_type::GATE,
                                         old.gate_id,
-                                        gid,
-                                        old.session_id,
+                                        route.key(),
+                                        route.session(),
                                         &kick,
                                         rpc_timeout,
                                     )

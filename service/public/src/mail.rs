@@ -1,7 +1,7 @@
 use std::{collections::HashSet, time::Duration};
 
 use xframe::{
-    FrameHandle, ServiceType,
+    FrameHandle,
     xrpc::{RpcContext, RpcManager},
 };
 use xkk_cache::load_online;
@@ -197,12 +197,11 @@ impl MailService {
         };
         let response: pb::AddItemsRsp = match self
             .frame
-            .call_player_to(
-                ServiceType::Logic,
+            .call_routed_to(
+                xkk_common::service_type::LOGIC,
                 online.logic_id,
-                gid,
-                i64::try_from(context.head.player_session)
-                    .expect("validated player session fits i64"),
+                context.head.gid,
+                context.head.player_session,
                 &pb::AddItemsReq {
                     gid,
                     items: attachments,
@@ -318,7 +317,7 @@ impl MailService {
         if let Err(error) = self
             .frame
             .send_to(
-                ServiceType::Gate,
+                xkk_common::service_type::GATE,
                 online.gate_id,
                 &pb::MailPushNtf {
                     gid,

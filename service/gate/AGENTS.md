@@ -7,8 +7,8 @@
   local xservice snapshot. A new-player Logic selection increments the selected local snapshot
   count before dispatch, and the next Redis refresh reconciles it. Dynamic load must not update
   etcd.
-- Gate authenticates Login/Reconnect, binds the xnet player route, and forwards Player/Item RPC to
-  Logic and Mail RPC to Public.
+- Gate authenticates Login/Reconnect, binds the xnet user connection, owns the player's Logic and
+  Public routes in its session state, and forwards Player/Item RPC to Logic and Mail RPC to Public.
 - Login and Reconnect responses publish the Gate-side session ID required by the next reconnect.
 - Player-bound messages enter the bounded outbox by default. xproto control IDs `1..99` and the
   explicitly enumerated Ping/Login/Reconnect/Logout/Kick session responses bypass it; adding an

@@ -10,7 +10,7 @@ use std::{
 use prost::Message;
 use tokio::{sync::mpsc, task::JoinHandle};
 use xframe::{
-    FrameHandle, ServiceType,
+    FrameHandle,
     xnet::{Connection, Frame as NetFrame, Handler, SessionId},
     xproto::cs::{CsHead, CsPacket},
     xproto::{RequestMessage, WireMessage},
@@ -161,7 +161,7 @@ impl GatewayState {
         if let Err(error) = self
             .rpc
             .send_server(
-                ServiceType::Logic,
+                xkk_common::service_type::LOGIC,
                 session.routes.logic_id,
                 &pb::LogicDisconnectNtf {
                     gid: session.gid,
@@ -543,7 +543,10 @@ impl GatewayState {
                 return;
             }
         };
-        let public_id = match self.frame.pick_by_hash(ServiceType::Public, request.gid) {
+        let public_id = match self
+            .frame
+            .pick_by_hash(xkk_common::service_type::PUBLIC, request.gid)
+        {
             Ok(instance) => instance.instance_id,
             Err(error) => {
                 tracing::warn!(gid = request.gid, %error, "Gate Public selection failed");
@@ -566,14 +569,16 @@ impl GatewayState {
             device_id: request.device_id.clone(),
             reconnect: false,
         };
+        let route = xkk_common::RouteIdentity::from_signed(request.gid, frame.session_id)
+            .expect("validated login route is positive");
         let rpc_started = Instant::now();
         let logic_response = self
             .frame
-            .call_player_to(
-                ServiceType::Logic,
+            .call_routed_to(
+                xkk_common::service_type::LOGIC,
                 logic_id,
-                request.gid,
-                frame.session_id,
+                route.key(),
+                route.session(),
                 &logic_request,
                 self.rpc_timeout,
             )
@@ -605,11 +610,7 @@ impl GatewayState {
             logic_id,
             public_id,
         };
-        if !frame
-            .conn
-            .bind_user(request.gid, routes.player_routes(self.gate_id))
-            || frame.conn.is_closed()
-        {
+        if !frame.conn.bind_user(request.gid) || frame.conn.is_closed() {
             frame.conn.close();
             return;
         }
@@ -728,13 +729,15 @@ impl GatewayState {
             device_id: request.device_id,
             reconnect: true,
         };
+        let route = xkk_common::RouteIdentity::from_signed(request.gid, frame.session_id)
+            .expect("validated reconnect route is positive");
         let logic_response: pb::LogicLoginRsp = match self
             .frame
-            .call_player_to(
-                ServiceType::Logic,
+            .call_routed_to(
+                xkk_common::service_type::LOGIC,
                 routes.logic_id,
-                request.gid,
-                frame.session_id,
+                route.key(),
+                route.session(),
                 &logic_request,
                 self.rpc_timeout,
             )
@@ -759,11 +762,7 @@ impl GatewayState {
             return;
         }
 
-        if !frame
-            .conn
-            .bind_user(request.gid, routes.player_routes(self.gate_id))
-            || frame.conn.is_closed()
-        {
+        if !frame.conn.bind_user(request.gid) || frame.conn.is_closed() {
             frame.conn.close();
             return;
         }
@@ -879,7 +878,7 @@ impl GatewayState {
         let _ = self
             .frame
             .send_to(
-                ServiceType::Logic,
+                xkk_common::service_type::LOGIC,
                 routes.logic_id,
                 &pb::LogicDisconnectNtf {
                     gid,
@@ -938,19 +937,21 @@ impl GatewayState {
             RouteTarget::Gate => unreachable!("Gate-local messages are not forwarded"),
         };
         let service_type = match target {
-            RouteTarget::Logic => ServiceType::Logic,
-            RouteTarget::Public => ServiceType::Public,
+            RouteTarget::Logic => xkk_common::service_type::LOGIC,
+            RouteTarget::Public => xkk_common::service_type::PUBLIC,
             RouteTarget::Gate => unreachable!("Gate-local messages are not forwarded"),
         };
         debug_assert_eq!(route_target(request_msgid), Some(target));
+        let route = xkk_common::RouteIdentity::from_signed(gid, frame.session_id)
+            .expect("bound request route is positive");
 
         let response: Req::Response = match self
             .frame
-            .call_player_to(
+            .call_routed_to(
                 service_type,
                 server_id,
-                gid,
-                frame.session_id,
+                route.key(),
+                route.session(),
                 &request,
                 self.rpc_timeout,
             )
@@ -1004,13 +1005,13 @@ impl GatewayState {
         if online.logic_id == 0 {
             return self
                 .frame
-                .pick_min_online_and_increment(ServiceType::Logic)
+                .pick_min_online_and_increment(xkk_common::service_type::LOGIC)
                 .ok()
                 .map(|instance| instance.instance_id);
         }
         let instance = self
             .frame
-            .service_instance(ServiceType::Logic, online.logic_id)
+            .service_instance(xkk_common::service_type::LOGIC, online.logic_id)
             .ok()?;
         (instance.enable
             && instance.healthy == ServiceStatus::Health
@@ -1031,7 +1032,7 @@ impl GatewayState {
         if let Err(error) = self
             .frame
             .send_to(
-                ServiceType::Logic,
+                xkk_common::service_type::LOGIC,
                 routes.logic_id,
                 &pb::LogicDisconnectNtf {
                     gid,

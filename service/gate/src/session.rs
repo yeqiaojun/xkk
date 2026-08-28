@@ -7,7 +7,7 @@ use std::{
 use prost::Message;
 use thiserror::Error;
 use xframe::{
-    xnet::{Connection, PlayerRoutes, SessionId},
+    xnet::{Connection, SessionId},
     xproto::cs::{CsHead, CsPacket},
 };
 use xkk_protocol::{MsgId, is_outbox_message, pb};
@@ -84,12 +84,6 @@ impl SessionConfig {
 pub(crate) struct Routes {
     pub logic_id: i32,
     pub public_id: i32,
-}
-
-impl Routes {
-    pub fn player_routes(self, gate_id: i32) -> PlayerRoutes {
-        PlayerRoutes::new(gate_id, self.logic_id, self.public_id)
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

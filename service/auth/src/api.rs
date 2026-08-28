@@ -1,7 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use tokio::sync::Semaphore;
-use xframe::{FrameHandle, ServiceType, xservice::ServiceStatus};
+use xframe::{FrameHandle, xservice::ServiceStatus};
 use xkk_cache::{enqueue_login, leave_login_queue, load_online, set_token};
 use xkk_common::{credential_hash, unix_millis, unix_seconds};
 use xkk_config::Security;
@@ -275,7 +275,7 @@ impl AuthApi {
             }
         }
 
-        let gates = match self.frame.service_instances(ServiceType::Gate) {
+        let gates = match self.frame.service_instances(xkk_common::service_type::GATE) {
             Ok(gates) => gates,
             Err(error) => {
                 tracing::warn!(gid = request.gid, %error, "Auth Gate discovery unavailable");
@@ -348,7 +348,7 @@ impl AuthApi {
 
         let gate = match self
             .frame
-            .pick_min_online_discovered_and_increment(ServiceType::Gate)
+            .pick_min_online_discovered_and_increment(xkk_common::service_type::GATE)
         {
             Ok(gate) => gate,
             Err(error) => {
@@ -442,7 +442,7 @@ mod tests {
             enable: true,
             weight: 1,
             cluster_name: "local".to_string(),
-            service_type: ServiceType::Gate,
+            service_type: xkk_common::service_type::GATE,
             host: "gate.example".to_string(),
             port: 3201,
             update_time: String::new(),

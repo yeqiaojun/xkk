@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 prost.workspace = true
 tokio.workspace = true
+xkk-common.workspace = true
 xkk-protocol.workspace = true
 xnet.workspace = true
 xproto.workspace = true

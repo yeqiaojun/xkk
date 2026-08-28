@@ -5,3 +5,4 @@ edition.workspace = true
 
 [dependencies]
 sha2.workspace = true
+xutil.workspace = true

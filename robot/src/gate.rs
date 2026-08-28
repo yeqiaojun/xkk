@@ -115,7 +115,8 @@ pub(crate) fn connect_gate(
         "kcp" => ConnectEndpoint::kcp(addr),
         "websocket" => ConnectEndpoint::websocket(addr),
         _ => return Err(failure("unsupported Gate transport")),
-    };
+    }
+    .external();
     let mut client_config = ClientConfig::new(connect_endpoint);
     if endpoint.transport == "websocket" {
         client_config = client_config

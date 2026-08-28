@@ -4,7 +4,7 @@ use thiserror::Error;
 use tokio::task::JoinHandle;
 use xframe::{
     Application, ApplicationResult, DiscoveryConfig, FrameConfig, FrameHandle, NodeConfig,
-    RpcConfig, ServiceType,
+    RpcConfig,
 };
 use xkk_persist::PublicPlayers;
 
@@ -44,7 +44,7 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
     let metadata = HashMap::from([("protocol".to_string(), "ss".to_string())]);
     let node = NodeConfig::new(
         &config.node.cluster,
-        ServiceType::Public,
+        xkk_common::service_type::PUBLIC,
         config.node.instance_id,
         &config.node.advertise_host,
         config.node.service_port,
@@ -133,8 +133,8 @@ impl PublicApplication {
 
 impl Application for PublicApplication {
     async fn start(&mut self, frame: FrameHandle) -> ApplicationResult {
-        frame.watch(ServiceType::Gate).await?;
-        frame.watch(ServiceType::Logic).await?;
+        frame.watch(xkk_common::service_type::GATE).await?;
+        frame.watch(xkk_common::service_type::LOGIC).await?;
         self.save_task = Some(spawn_player_save(
             self.players.clone(),
             PLAYER_SAVE_INTERVAL,
