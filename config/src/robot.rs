@@ -64,10 +64,7 @@ impl RobotConfig {
             return Err(invalid(SERVICE, "device_id must contain at least 8 bytes"));
         }
         if self.platform.is_empty() || self.client_version.is_empty() {
-            return Err(invalid(
-                SERVICE,
-                "platform and client_version must not be empty",
-            ));
+            return Err(invalid(SERVICE, "platform and client_version must not be empty"));
         }
         if self.timeout_seconds == 0 {
             return Err(invalid(SERVICE, "timeout_seconds must be positive"));
@@ -90,9 +87,6 @@ mod tests {
     #[test]
     fn invalid_device_fails_fast() {
         let yaml = include_str!("../robot.yaml").replace("xkk-robot-device", "short");
-        assert!(matches!(
-            RobotConfig::parse(&yaml),
-            Err(crate::ConfigError::Invalid { .. })
-        ));
+        assert!(matches!(RobotConfig::parse(&yaml), Err(crate::ConfigError::Invalid { .. })));
     }
 }

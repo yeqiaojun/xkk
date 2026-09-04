@@ -44,11 +44,7 @@ pub struct Persistence<P, E> {
 
 impl<P, E> Clone for Persistence<P, E> {
     fn clone(&self) -> Self {
-        Self {
-            loader: self.loader.clone(),
-            saver: self.saver.clone(),
-            batch_saver: self.batch_saver.clone(),
-        }
+        Self { loader: self.loader.clone(), saver: self.saver.clone(), batch_saver: self.batch_saver.clone() }
     }
 }
 

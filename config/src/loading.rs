@@ -31,10 +31,7 @@ pub enum ConfigError {
         source: serde_json::Error,
     },
     #[error("invalid {service} configuration: {message}")]
-    Invalid {
-        service: &'static str,
-        message: &'static str,
-    },
+    Invalid { service: &'static str, message: &'static str },
 }
 
 pub type Result<T> = std::result::Result<T, ConfigError>;
@@ -56,17 +53,12 @@ where
     decode(&yaml, path)
 }
 
-pub(crate) fn load_service<T>(
-    role_path: impl Into<PathBuf>,
-) -> Result<(CommonConfig, T, ServiceVersion)>
+pub(crate) fn load_service<T>(role_path: impl Into<PathBuf>) -> Result<(CommonConfig, T, ServiceVersion)>
 where
     T: DeserializeOwned,
 {
     let role_path = role_path.into();
-    let directory = role_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .to_path_buf();
+    let directory = role_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
     let common = load(directory.join("common.yaml"))?;
     let role = load(&role_path)?;
     let version_path = directory.join("version.json");
@@ -75,11 +67,7 @@ where
     Ok((common, role, version))
 }
 
-pub(crate) fn parse_service<T>(
-    common_yaml: &str,
-    role_yaml: &str,
-    version_json: &str,
-) -> Result<(CommonConfig, T, ServiceVersion)>
+pub(crate) fn parse_service<T>(common_yaml: &str, role_yaml: &str, version_json: &str) -> Result<(CommonConfig, T, ServiceVersion)>
 where
     T: DeserializeOwned,
 {
@@ -104,10 +92,7 @@ where
 }
 
 fn read(path: &Path) -> Result<String> {
-    std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
-        path: path.to_path_buf(),
-        source,
-    })
+    std::fs::read_to_string(path).map_err(|source| ConfigError::Read { path: path.to_path_buf(), source })
 }
 
 pub(crate) fn invalid(service: &'static str, message: &'static str) -> ConfigError {

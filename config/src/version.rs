@@ -18,16 +18,10 @@ struct VersionDocument {
 
 impl ServiceVersion {
     pub(crate) fn decode(json: &str, path: PathBuf) -> Result<Self> {
-        let document: VersionDocument = serde_json::from_str(json)
-            .map_err(|source| ConfigError::DecodeVersion { path, source })?;
+        let document: VersionDocument = serde_json::from_str(json).map_err(|source| ConfigError::DecodeVersion { path, source })?;
         if document.conf_version < 0 {
             return Err(invalid("version", "conf_version must be non-negative"));
         }
-        Ok(Self {
-            program: env!("XKK_PRO_VERSION")
-                .parse()
-                .expect("build script validates XKK_PRO_VERSION"),
-            conf: document.conf_version,
-        })
+        Ok(Self { program: env!("XKK_PRO_VERSION").parse().expect("build script validates XKK_PRO_VERSION"), conf: document.conf_version })
     }
 }

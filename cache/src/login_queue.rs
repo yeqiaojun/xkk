@@ -4,12 +4,7 @@ use xredis::{self, redis};
 
 const LOGIN_QUEUE_KEY: &str = "xkk:login_queue";
 
-pub async fn enqueue_login(
-    client: &xredis::Client,
-    gid: i64,
-    now_ms: i64,
-    entry_ttl: Duration,
-) -> xredis::Result<i64> {
+pub async fn enqueue_login(client: &xredis::Client, gid: i64, now_ms: i64, entry_ttl: Duration) -> xredis::Result<i64> {
     assert!(gid > 0, "login queue gid must be positive");
     assert!(!entry_ttl.is_zero(), "login queue TTL must be positive");
 
@@ -36,12 +31,7 @@ return rank + 1
 pub async fn leave_login_queue(client: &xredis::Client, gid: i64) -> xredis::Result<()> {
     assert!(gid > 0, "login queue gid must be positive");
     let mut connection = client.connection();
-    let _: usize = redis::cmd("ZREM")
-        .arg(LOGIN_QUEUE_KEY)
-        .arg(gid)
-        .query_async(&mut connection)
-        .await
-        .map_err(xredis::Error::from)?;
+    let _: usize = redis::cmd("ZREM").arg(LOGIN_QUEUE_KEY).arg(gid).query_async(&mut connection).await.map_err(xredis::Error::from)?;
     Ok(())
 }
 

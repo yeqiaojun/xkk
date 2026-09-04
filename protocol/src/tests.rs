@@ -69,10 +69,7 @@ fn complete_registry_has_every_generated_message() {
 #[test]
 fn generated_message_mapping_is_bidirectional() {
     let registry = message_registry().unwrap();
-    assert_eq!(
-        registry.message_id_for_type::<pb::PingReq>(),
-        Some(MsgId::PingReq.as_u16())
-    );
+    assert_eq!(registry.message_id_for_type::<pb::PingReq>(), Some(MsgId::PingReq.as_u16()));
 
     let ping = registry.new_message(MsgId::PingReq.as_u16()).unwrap();
     assert!(ping.downcast_ref::<pb::PingReq>().is_some());
@@ -81,9 +78,7 @@ fn generated_message_mapping_is_bidirectional() {
         let Some(msgid) = from_u16(raw) else {
             continue;
         };
-        let message = registry
-            .new_message(raw)
-            .expect("generated message must have a factory");
+        let message = registry.new_message(raw).expect("generated message must have a factory");
         assert_eq!(message.msgid(), msgid.as_u16());
     }
 }
@@ -92,13 +87,7 @@ fn generated_message_mapping_is_bidirectional() {
 fn generated_xmongo_traits_roundtrip_player_data() {
     let mut player = pb::PlayerData {
         gid: 1001,
-        profile: Some(pb::PlayerInfo {
-            gid: 1001,
-            name: "tester".to_string(),
-            level: 2,
-            icon: 3,
-            exp: 4,
-        }),
+        profile: Some(pb::PlayerInfo { gid: 1001, name: "tester".to_string(), level: 2, icon: 3, exp: 4 }),
         ..Default::default()
     };
     player.items.insert(2001, 7);
@@ -114,12 +103,7 @@ fn generated_xmongo_traits_roundtrip_public_player_data() {
     let player = pb::PublicPlayerData {
         gid: 1002,
         mail: Some(pb::MailData {
-            mails: vec![pb::Mail {
-                mail_id: 7,
-                title: "welcome".to_string(),
-                content: "hello".to_string(),
-                ..Default::default()
-            }],
+            mails: vec![pb::Mail { mail_id: 7, title: "welcome".to_string(), content: "hello".to_string(), ..Default::default() }],
         }),
     };
 

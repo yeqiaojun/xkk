@@ -41,42 +41,15 @@ impl SessionConfig {
     };
 
     pub fn validate(self) {
-        assert!(
-            self.outbox_messages > 0,
-            "Gate outbox capacity must be positive"
-        );
-        assert!(
-            !self.resume_ttl.is_zero(),
-            "Gate resume TTL must be positive"
-        );
-        assert!(
-            self.reconnect_total > 0,
-            "Gate reconnect total must be positive"
-        );
-        assert!(
-            self.reconnect_window_count > 0,
-            "Gate reconnect window count must be positive"
-        );
-        assert!(
-            self.reconnect_window_count <= self.reconnect_total,
-            "Gate reconnect window count cannot exceed total"
-        );
-        assert!(
-            !self.reconnect_window.is_zero(),
-            "Gate reconnect window must be positive"
-        );
-        assert!(
-            self.request_window_count > 0 && self.burst_count > 0,
-            "Gate request limits must be positive"
-        );
-        assert!(
-            self.burst_count <= self.request_window_count,
-            "Gate burst limit cannot exceed request limit"
-        );
-        assert!(
-            !self.request_window.is_zero() && !self.burst_window.is_zero(),
-            "Gate request windows must be positive"
-        );
+        assert!(self.outbox_messages > 0, "Gate outbox capacity must be positive");
+        assert!(!self.resume_ttl.is_zero(), "Gate resume TTL must be positive");
+        assert!(self.reconnect_total > 0, "Gate reconnect total must be positive");
+        assert!(self.reconnect_window_count > 0, "Gate reconnect window count must be positive");
+        assert!(self.reconnect_window_count <= self.reconnect_total, "Gate reconnect window count cannot exceed total");
+        assert!(!self.reconnect_window.is_zero(), "Gate reconnect window must be positive");
+        assert!(self.request_window_count > 0 && self.burst_count > 0, "Gate request limits must be positive");
+        assert!(self.burst_count <= self.request_window_count, "Gate burst limit cannot exceed request limit");
+        assert!(!self.request_window.is_zero() && !self.burst_window.is_zero(), "Gate request windows must be positive");
     }
 }
 
@@ -150,32 +123,13 @@ pub(crate) struct ClientSessions {
 impl ClientSessions {
     pub fn new(config: SessionConfig) -> Self {
         config.validate();
-        Self {
-            players: Arc::new(RwLock::new(HashMap::new())),
-            config,
-        }
+        Self { players: Arc::new(RwLock::new(HashMap::new())), config }
     }
 
-    pub fn install_login(
-        &self,
-        gid: i64,
-        conn: Connection,
-        routes: Routes,
-        client_seq: u32,
-    ) -> bool {
+    pub fn install_login(&self, gid: i64, conn: Connection, routes: Routes, client_seq: u32) -> bool {
         let mut players = self.players.write().expect("Gate player map poisoned");
-        let previous_active = players
-            .get(&gid)
-            .is_some_and(|session| session.lock().expect("Gate session poisoned").active());
-        players.insert(
-            gid,
-            Arc::new(Mutex::new(ClientSession::new(
-                conn,
-                routes,
-                client_seq,
-                self.config,
-            ))),
-        );
+        let previous_active = players.get(&gid).is_some_and(|session| session.lock().expect("Gate session poisoned").active());
+        players.insert(gid, Arc::new(Mutex::new(ClientSession::new(conn, routes, client_seq, self.config))));
         !previous_active
     }
 
@@ -206,39 +160,19 @@ impl ClientSessions {
         session.complete_reconnect(previous_session, conn, client_seq, ack, now, self.config)
     }
 
-    pub fn accept_request(
-        &self,
-        gid: i64,
-        session_id: SessionId,
-        seq: u32,
-        ack: u32,
-        now: Instant,
-    ) -> Result<Routes, RequestError> {
+    pub fn accept_request(&self, gid: i64, session_id: SessionId, seq: u32, ack: u32, now: Instant) -> Result<Routes, RequestError> {
         let session = self.get(gid).ok_or(RequestError::SessionMismatch)?;
         let mut session = session.lock().expect("Gate session poisoned");
         session.accept_request(session_id, seq, ack, now, self.config)
     }
 
-    pub fn acknowledge(
-        &self,
-        gid: i64,
-        session_id: SessionId,
-        seq: u32,
-        ack: u32,
-        now: Instant,
-    ) -> Result<(), RequestError> {
+    pub fn acknowledge(&self, gid: i64, session_id: SessionId, seq: u32, ack: u32, now: Instant) -> Result<(), RequestError> {
         let session = self.get(gid).ok_or(RequestError::SessionMismatch)?;
         let mut session = session.lock().expect("Gate session poisoned");
         session.accept_sequence(session_id, seq, ack, now, self.config.resume_ttl)
     }
 
-    pub fn send<M>(
-        &self,
-        gid: i64,
-        session_id: SessionId,
-        msgid: MsgId,
-        message: &M,
-    ) -> Result<(), SendError>
+    pub fn send<M>(&self, gid: i64, session_id: SessionId, msgid: MsgId, message: &M) -> Result<(), SendError>
     where
         M: Message,
     {
@@ -248,10 +182,7 @@ impl ClientSessions {
             return Err(SendError::SessionMismatch);
         }
         let payload = session.encode(msgid, message, Instant::now(), self.config)?;
-        let conn = session
-            .conn
-            .as_ref()
-            .expect("active Gate session has no connection");
+        let conn = session.conn.as_ref().expect("active Gate session has no connection");
         match conn.send_shared(payload) {
             Ok(()) => {}
             Err(xframe::xnet::Error::Backpressure { .. }) => return Err(SendError::QueueFull),
@@ -286,15 +217,8 @@ impl ClientSessions {
             }
             let conn = session.conn.take();
             if let Some(conn) = conn.as_ref()
-                && let Ok(payload) = session.encode(
-                    MsgId::KickNtf,
-                    &pb::KickNtf {
-                        code,
-                        reason: reason.to_string(),
-                    },
-                    Instant::now(),
-                    self.config,
-                )
+                && let Ok(payload) =
+                    session.encode(MsgId::KickNtf, &pb::KickNtf { code, reason: reason.to_string() }, Instant::now(), self.config)
                 && let Err(error) = conn.send_shared(payload)
             {
                 tracing::warn!(gid, session_id, %error, "Gate kick notification send failed");
@@ -304,10 +228,7 @@ impl ClientSessions {
         };
 
         let mut players = self.players.write().expect("Gate player map poisoned");
-        if players
-            .get(&gid)
-            .is_some_and(|current| Arc::ptr_eq(current, &session))
-        {
+        if players.get(&gid).is_some_and(|current| Arc::ptr_eq(current, &session)) {
             players.remove(&gid);
         }
         if let Some(conn) = conn {
@@ -330,27 +251,18 @@ impl ClientSessions {
 
     pub fn prune_expired(&self, now: Instant) -> usize {
         let mut removed = 0;
-        self.players
-            .write()
-            .expect("Gate player map poisoned")
-            .retain(|_, session| {
-                let session = session.lock().expect("Gate session poisoned");
-                let keep = session.active()
-                    || session
-                        .disconnected_at
-                        .is_some_and(|at| now.duration_since(at) <= self.config.resume_ttl);
-                removed += usize::from(!keep);
-                keep
-            });
+        self.players.write().expect("Gate player map poisoned").retain(|_, session| {
+            let session = session.lock().expect("Gate session poisoned");
+            let keep = session.active() || session.disconnected_at.is_some_and(|at| now.duration_since(at) <= self.config.resume_ttl);
+            removed += usize::from(!keep);
+            keep
+        });
         removed
     }
 
     pub fn stats(&self) -> StoreStats {
         let players = self.players.read().expect("Gate player map poisoned");
-        let mut stats = StoreStats {
-            players: players.len(),
-            ..Default::default()
-        };
+        let mut stats = StoreStats { players: players.len(), ..Default::default() };
         for session in players.values() {
             let session = session.lock().expect("Gate session poisoned");
             if session.active() {
@@ -373,43 +285,21 @@ impl ClientSessions {
                 if let Some(conn) = session.conn.take() {
                     conn.close();
                 }
-                ClosingSession {
-                    gid,
-                    session_id: session.session_id,
-                    routes: session.routes,
-                }
+                ClosingSession { gid, session_id: session.session_id, routes: session.routes }
             })
             .collect()
     }
 
     fn get(&self, gid: i64) -> Option<Arc<Mutex<ClientSession>>> {
-        self.players
-            .read()
-            .expect("Gate player map poisoned")
-            .get(&gid)
-            .cloned()
+        self.players.read().expect("Gate player map poisoned").get(&gid).cloned()
     }
 }
 
-pub(crate) fn encode_direct<M>(
-    msgid: MsgId,
-    ack: u32,
-    message: &M,
-) -> xframe::xproto::Result<Arc<[u8]>>
+pub(crate) fn encode_direct<M>(msgid: MsgId, ack: u32, message: &M) -> xframe::xproto::Result<Arc<[u8]>>
 where
     M: Message,
 {
-    Ok(Arc::from(
-        CsPacket::encode_message(
-            CsHead {
-                msgid: msgid.as_u16(),
-                ack,
-                ..Default::default()
-            },
-            message,
-        )?
-        .into_boxed_slice(),
-    ))
+    Ok(Arc::from(CsPacket::encode_message(CsHead { msgid: msgid.as_u16(), ack, ..Default::default() }, message)?.into_boxed_slice()))
 }
 
 struct ClientSession {
@@ -461,17 +351,11 @@ impl ClientSession {
         if !seq_after(client_seq, self.client_seq) {
             return Err(ResumeError::SessionMismatch);
         }
-        if self
-            .disconnected_at
-            .is_some_and(|at| now.duration_since(at) > config.resume_ttl)
-        {
+        if self.disconnected_at.is_some_and(|at| now.duration_since(at) > config.resume_ttl) {
             return Err(ResumeError::Expired);
         }
         self.prune_outbox(now, config.resume_ttl);
-        if self
-            .dropped_through
-            .is_some_and(|dropped| !seq_at_or_after(ack, dropped))
-        {
+        if self.dropped_through.is_some_and(|dropped| !seq_at_or_after(ack, dropped)) {
             return Err(ResumeError::OutboxGap);
         }
         if self.reconnect_count >= config.reconnect_total {
@@ -482,11 +366,7 @@ impl ClientSession {
             );
             return Err(ResumeError::RateLimited);
         }
-        while self
-            .reconnect_times
-            .front()
-            .is_some_and(|at| now.duration_since(*at) >= config.reconnect_window)
-        {
+        while self.reconnect_times.front().is_some_and(|at| now.duration_since(*at) >= config.reconnect_window) {
             self.reconnect_times.pop_front();
         }
         if self.reconnect_times.len() >= config.reconnect_window_count {
@@ -518,10 +398,7 @@ impl ClientSession {
             return Err(ResumeError::SessionMismatch);
         }
         self.prune_outbox(now, config.resume_ttl);
-        if self
-            .dropped_through
-            .is_some_and(|dropped| !seq_at_or_after(ack, dropped))
-        {
+        if self.dropped_through.is_some_and(|dropped| !seq_at_or_after(ack, dropped)) {
             return Err(ResumeError::OutboxGap);
         }
         self.acknowledge_outbox(ack);
@@ -530,16 +407,8 @@ impl ClientSession {
         self.conn = Some(conn);
         self.client_seq = client_seq;
         self.disconnected_at = None;
-        let replay = self
-            .outbox
-            .iter()
-            .filter(|message| seq_after(message.seq, ack))
-            .map(|message| message.payload.clone())
-            .collect();
-        Ok(ReconnectResult {
-            replay,
-            became_active,
-        })
+        let replay = self.outbox.iter().filter(|message| seq_after(message.seq, ack)).map(|message| message.payload.clone()).collect();
+        Ok(ReconnectResult { replay, became_active })
     }
 
     fn accept_request(
@@ -558,11 +427,7 @@ impl ClientSession {
     }
 
     fn accept_rate(&mut self, now: Instant, config: SessionConfig) -> bool {
-        while self
-            .request_times
-            .front()
-            .is_some_and(|at| now.duration_since(*at) >= config.request_window)
-        {
+        while self.request_times.front().is_some_and(|at| now.duration_since(*at) >= config.request_window) {
             self.request_times.pop_front();
         }
         if self.request_times.len() >= config.request_window_count {
@@ -573,18 +438,9 @@ impl ClientSession {
             );
             return false;
         }
-        let burst = self
-            .request_times
-            .iter()
-            .rev()
-            .take_while(|at| now.duration_since(**at) < config.burst_window)
-            .count();
+        let burst = self.request_times.iter().rev().take_while(|at| now.duration_since(**at) < config.burst_window).count();
         if burst >= config.burst_count {
-            tracing::error!(
-                request_count = burst,
-                limit = config.burst_count,
-                "Gate request burst hard limit exceeded"
-            );
+            tracing::error!(request_count = burst, limit = config.burst_count, "Gate request burst hard limit exceeded");
             return false;
         }
         self.request_times.push_back(now);
@@ -611,25 +467,14 @@ impl ClientSession {
         Ok(())
     }
 
-    fn encode<M>(
-        &mut self,
-        msgid: MsgId,
-        message: &M,
-        now: Instant,
-        config: SessionConfig,
-    ) -> xframe::xproto::Result<Arc<[u8]>>
+    fn encode<M>(&mut self, msgid: MsgId, message: &M, now: Instant, config: SessionConfig) -> xframe::xproto::Result<Arc<[u8]>>
     where
         M: Message,
     {
         self.server_seq = self.server_seq.wrapping_add(1);
         let payload: Arc<[u8]> = Arc::from(
             CsPacket::encode_message(
-                CsHead {
-                    msgid: msgid.as_u16(),
-                    seq: self.server_seq,
-                    ack: self.client_seq,
-                    ..Default::default()
-                },
+                CsHead { msgid: msgid.as_u16(), seq: self.server_seq, ack: self.client_seq, ..Default::default() },
                 message,
             )?
             .into_boxed_slice(),
@@ -642,41 +487,23 @@ impl ClientSession {
                     limit = config.outbox_messages,
                     "Gate outbox hard limit exceeded; dropping oldest message"
                 );
-                let dropped = self
-                    .outbox
-                    .pop_front()
-                    .expect("full Gate outbox must have an oldest message");
+                let dropped = self.outbox.pop_front().expect("full Gate outbox must have an oldest message");
                 self.dropped_through = Some(dropped.seq);
             }
-            self.outbox.push_back(OutboxMessage {
-                seq: self.server_seq,
-                sent_at: now,
-                payload: payload.clone(),
-            });
+            self.outbox.push_back(OutboxMessage { seq: self.server_seq, sent_at: now, payload: payload.clone() });
         }
         Ok(payload)
     }
 
     fn prune_outbox(&mut self, now: Instant, ttl: Duration) {
-        while self
-            .outbox
-            .front()
-            .is_some_and(|message| now.duration_since(message.sent_at) > ttl)
-        {
-            let dropped = self
-                .outbox
-                .pop_front()
-                .expect("Gate outbox front disappeared");
+        while self.outbox.front().is_some_and(|message| now.duration_since(message.sent_at) > ttl) {
+            let dropped = self.outbox.pop_front().expect("Gate outbox front disappeared");
             self.dropped_through = Some(dropped.seq);
         }
     }
 
     fn acknowledge_outbox(&mut self, ack: u32) {
-        while self
-            .outbox
-            .front()
-            .is_some_and(|message| !seq_after(message.seq, ack))
-        {
+        while self.outbox.front().is_some_and(|message| !seq_after(message.seq, ack)) {
             self.outbox.pop_front();
         }
     }
@@ -702,20 +529,14 @@ mod tests {
     use super::*;
 
     fn config() -> SessionConfig {
-        SessionConfig {
-            outbox_messages: 2,
-            ..SessionConfig::HARD_LIMITS
-        }
+        SessionConfig { outbox_messages: 2, ..SessionConfig::HARD_LIMITS }
     }
 
     fn offline_session(now: Instant) -> ClientSession {
         ClientSession {
             session_id: 11,
             conn: None,
-            routes: Routes {
-                logic_id: 1,
-                public_id: 2,
-            },
+            routes: Routes { logic_id: 1, public_id: 2 },
             server_seq: 0,
             client_seq: 0,
             outbox: VecDeque::with_capacity(2),
@@ -740,26 +561,12 @@ mod tests {
         let now = Instant::now();
         let mut session = offline_session(now);
         let cfg = config();
-        session
-            .encode(
-                MsgId::PlayerInfoRsp,
-                &pb::PlayerInfoRsp::default(),
-                now,
-                cfg,
-            )
-            .unwrap();
-        session
-            .encode(MsgId::UseItemRsp, &pb::UseItemRsp::default(), now, cfg)
-            .unwrap();
-        session
-            .encode(MsgId::MailListRsp, &pb::MailListRsp::default(), now, cfg)
-            .unwrap();
+        session.encode(MsgId::PlayerInfoRsp, &pb::PlayerInfoRsp::default(), now, cfg).unwrap();
+        session.encode(MsgId::UseItemRsp, &pb::UseItemRsp::default(), now, cfg).unwrap();
+        session.encode(MsgId::MailListRsp, &pb::MailListRsp::default(), now, cfg).unwrap();
 
         assert_eq!(session.outbox.len(), 2);
-        assert_eq!(
-            session.authorize_reconnect(11, 1, 0, now, cfg),
-            Err(ResumeError::OutboxGap)
-        );
+        assert_eq!(session.authorize_reconnect(11, 1, 0, now, cfg), Err(ResumeError::OutboxGap));
         assert!(session.authorize_reconnect(11, 1, 1, now, cfg).is_ok());
     }
 
@@ -767,9 +574,7 @@ mod tests {
     fn control_messages_do_not_enter_outbox() {
         let now = Instant::now();
         let mut session = offline_session(now);
-        session
-            .encode(MsgId::PingRsp, &pb::PingRsp::default(), now, config())
-            .unwrap();
+        session.encode(MsgId::PingRsp, &pb::PingRsp::default(), now, config()).unwrap();
         assert!(session.outbox.is_empty());
     }
 
@@ -780,27 +585,13 @@ mod tests {
         session.disconnected_at = None;
         let cfg = config();
         for offset in 0..5 {
-            assert!(
-                session
-                    .authorize_reconnect(11, 1, 0, now + Duration::from_secs(offset), cfg)
-                    .is_ok()
-            );
+            assert!(session.authorize_reconnect(11, 1, 0, now + Duration::from_secs(offset), cfg).is_ok());
         }
-        assert_eq!(
-            session.authorize_reconnect(11, 1, 0, now + Duration::from_secs(5), cfg),
-            Err(ResumeError::RateLimited)
-        );
+        assert_eq!(session.authorize_reconnect(11, 1, 0, now + Duration::from_secs(5), cfg), Err(ResumeError::RateLimited));
         for offset in 0..5 {
-            assert!(
-                session
-                    .authorize_reconnect(11, 1, 0, now + Duration::from_secs(61 + offset), cfg,)
-                    .is_ok()
-            );
+            assert!(session.authorize_reconnect(11, 1, 0, now + Duration::from_secs(61 + offset), cfg,).is_ok());
         }
-        assert_eq!(
-            session.authorize_reconnect(11, 1, 0, now + Duration::from_secs(122), cfg),
-            Err(ResumeError::RateLimited)
-        );
+        assert_eq!(session.authorize_reconnect(11, 1, 0, now + Duration::from_secs(122), cfg), Err(ResumeError::RateLimited));
     }
 
     #[test]
@@ -824,11 +615,7 @@ mod tests {
     #[test]
     fn drain_removes_offline_resume_state() {
         let sessions = ClientSessions::new(config());
-        sessions
-            .players
-            .write()
-            .unwrap()
-            .insert(7, Arc::new(Mutex::new(offline_session(Instant::now()))));
+        sessions.players.write().unwrap().insert(7, Arc::new(Mutex::new(offline_session(Instant::now()))));
 
         let drained = sessions.drain();
 

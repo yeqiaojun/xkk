@@ -39,11 +39,8 @@ pub async fn load_online(client: &xredis::Client, gid: i64) -> Result<Option<Onl
         return Err(OnlineError::InvalidGid);
     }
     let mut connection = client.connection();
-    let fields: HashMap<String, String> = redis::cmd("HGETALL")
-        .arg(online_key(gid))
-        .query_async(&mut connection)
-        .await
-        .map_err(xredis::Error::from)?;
+    let fields: HashMap<String, String> =
+        redis::cmd("HGETALL").arg(online_key(gid)).query_async(&mut connection).await.map_err(xredis::Error::from)?;
     if fields.is_empty() {
         return Ok(None);
     }
@@ -94,19 +91,11 @@ pub async fn save_online(client: &xredis::Client, data: &OnlineData) -> Result<(
         .arg(online_key(data.gid))
         .arg(ONLINE_TTL_SECONDS)
         .ignore();
-    let _: () = pipeline
-        .query_async(&mut connection)
-        .await
-        .map_err(xredis::Error::from)?;
+    let _: () = pipeline.query_async(&mut connection).await.map_err(xredis::Error::from)?;
     Ok(())
 }
 
-pub async fn set_token(
-    client: &xredis::Client,
-    gid: i64,
-    account: &str,
-    token: &str,
-) -> Result<()> {
+pub async fn set_token(client: &xredis::Client, gid: i64, account: &str, token: &str) -> Result<()> {
     if gid <= 0 {
         return Err(OnlineError::InvalidGid);
     }
@@ -127,10 +116,7 @@ pub async fn set_token(
         .arg(online_key(gid))
         .arg(ONLINE_TTL_SECONDS)
         .ignore();
-    let _: () = pipeline
-        .query_async(&mut connection)
-        .await
-        .map_err(xredis::Error::from)?;
+    let _: () = pipeline.query_async(&mut connection).await.map_err(xredis::Error::from)?;
     Ok(())
 }
 
@@ -149,12 +135,7 @@ pub async fn set_logic_owner(client: &xredis::Client, gid: i64, logic_id: i32) -
     Ok(())
 }
 
-pub async fn clear_gate_by_session(
-    client: &xredis::Client,
-    gid: i64,
-    session: i64,
-    logout_time: i64,
-) -> Result<bool> {
+pub async fn clear_gate_by_session(client: &xredis::Client, gid: i64, session: i64, logout_time: i64) -> Result<bool> {
     const CLEAR: &str = r#"
 local current = redis.call('HGET', KEYS[1], 'sess')
 if not current or tonumber(current) ~= tonumber(ARGV[1]) then
@@ -179,20 +160,14 @@ fn parse_i64(fields: &HashMap<String, String>, field: &'static str, default: i64
     let Some(value) = fields.get(field) else {
         return Ok(default);
     };
-    value.parse().map_err(|_| OnlineError::InvalidField {
-        field,
-        value: value.clone(),
-    })
+    value.parse().map_err(|_| OnlineError::InvalidField { field, value: value.clone() })
 }
 
 fn parse_i32(fields: &HashMap<String, String>, field: &'static str, default: i32) -> Result<i32> {
     let Some(value) = fields.get(field) else {
         return Ok(default);
     };
-    value.parse().map_err(|_| OnlineError::InvalidField {
-        field,
-        value: value.clone(),
-    })
+    value.parse().map_err(|_| OnlineError::InvalidField { field, value: value.clone() })
 }
 
 #[cfg(test)]

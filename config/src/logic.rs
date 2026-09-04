@@ -38,11 +38,7 @@ impl LogicConfig {
         Self::compose(common, role, version)
     }
 
-    fn compose(
-        common: CommonConfig,
-        role: LogicRoleConfig,
-        version: ServiceVersion,
-    ) -> Result<Self> {
+    fn compose(common: CommonConfig, role: LogicRoleConfig, version: ServiceVersion) -> Result<Self> {
         common.validate(SERVICE)?;
         let config = Self {
             node: role.node.compose(common.cluster.clone()),

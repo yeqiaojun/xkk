@@ -21,11 +21,7 @@ impl LogicState for Player {
 }
 
 fn main() {
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_time()
-        .build()
-        .unwrap()
-        .block_on(run());
+    tokio::runtime::Builder::new_multi_thread().enable_time().build().unwrap().block_on(run());
 }
 
 async fn run() {
@@ -42,10 +38,7 @@ async fn run() {
         max_kib_per_gid: 2,
         ..LogicConfig::default()
     };
-    let persistence = Persistence::new(
-        |_| async { Ok::<_, Infallible>(Player::default()) },
-        |_| async { Ok::<_, Infallible>(()) },
-    );
+    let persistence = Persistence::new(|_| async { Ok::<_, Infallible>(Player::default()) }, |_| async { Ok::<_, Infallible>(()) });
     let runtime = Arc::new(LogicRuntime::new(config, persistence));
 
     for gid in 0..workers as i64 {
@@ -95,12 +88,5 @@ async fn run() {
 }
 
 fn env_usize(name: &str, default: usize) -> usize {
-    env::var(name)
-        .ok()
-        .map(|value| {
-            value
-                .parse()
-                .expect("benchmark environment value must be usize")
-        })
-        .unwrap_or(default)
+    env::var(name).ok().map(|value| value.parse().expect("benchmark environment value must be usize")).unwrap_or(default)
 }

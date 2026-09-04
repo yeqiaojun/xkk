@@ -13,3 +13,5 @@ xkk-persist.workspace = true
 xkk-protocol.workspace = true
 xframe.workspace = true
 xlog.workspace = true
+xmongo.workspace = true
+xredis.workspace = true

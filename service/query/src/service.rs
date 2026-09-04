@@ -2,10 +2,7 @@ use std::{collections::HashMap, io, path::PathBuf, time::Duration};
 
 use thiserror::Error;
 use tokio::task::JoinHandle;
-use xframe::{
-    Application, ApplicationResult, DiscoveryConfig, FrameConfig, FrameHandle, FrameState,
-    HttpServerConfig, NodeConfig, RpcConfig,
-};
+use xframe::{Application, ApplicationResult, DiscoveryConfig, FrameHandle, FrameState, NodeConfig, RpcConfig, ServiceConfig};
 use xkk_protocol::pb;
 
 use crate::query::QueryApi;
@@ -31,16 +28,16 @@ pub enum ServiceError {
     #[error("close Query log worker: {0}")]
     LogClose(#[source] io::Error),
     #[error(transparent)]
-    Mongo(#[from] xframe::xmongo::Error),
+    Mongo(#[from] xmongo::Error),
     #[error(transparent)]
     Persist(#[from] xkk_persist::Error),
     #[error(transparent)]
-    Redis(#[from] xframe::xredis::Error),
+    Redis(#[from] xredis::Error),
     #[error(transparent)]
     Protocol(#[from] xkk_protocol::ProtocolError),
 }
 
-fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
+fn service_config(config: &Config) -> Result<ServiceConfig, ServiceError> {
     let metadata = HashMap::from([
         ("protocol".to_string(), "http".to_string()),
         ("health_path".to_string(), "/healthz".to_string()),
@@ -57,19 +54,7 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
     .with_meta_data(metadata);
     let discovery = DiscoveryConfig::new(&config.infrastructure.etcd_dsn)?;
 
-    Ok(FrameConfig::new(node)
-        .with_discovery(discovery)
-        .with_mongo(xframe::xmongo::Config::new(
-            &config.infrastructure.mongo_dsn,
-        )?)
-        .with_redis(xframe::xredis::RedisConfig::new(
-            &config.infrastructure.redis_dsn,
-        )?)
-        .with_http(HttpServerConfig::new(format!(
-            "{}:{}",
-            config.node.listen_host, config.node.http_port
-        ))?)
-        .with_rpc(RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)))
+    Ok(ServiceConfig::new(node).with_discovery(discovery).with_rpc(RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)))
 }
 
 pub fn config_path() -> Result<PathBuf, ServiceError> {
@@ -79,54 +64,58 @@ pub fn config_path() -> Result<PathBuf, ServiceError> {
 pub async fn run(config: Config) -> Result<(), ServiceError> {
     config.validate()?;
     let log_options = config.log.options("logs/query.log");
-    let frame_config = frame_config(&config)?;
+    let service_config = service_config(&config)?;
     let instance_id = config.node.instance_id;
+    let http_addr = format!("{}:{}", config.node.listen_host, config.node.http_port);
     let log_guard = xlog::init_global(log_options)?;
 
     let service: Result<(), ServiceError> = async {
+        xkk_common::service_type::init();
         xkk_protocol::init_global_registry()?;
-        let mut prepared = xframe::prepare(frame_config).await?;
-        let handle = prepared.handle();
-        let mongo = handle
-            .mongo()
-            .expect("Query FrameConfig always enables Mongo");
-        let database = xkk_persist::Database::new(mongo)?;
-        let api = QueryApi::new(database.players());
-        let ready_handle = handle.clone();
-        let gamer_info = api.clone();
-        let http = xframe::xhttp::App::new()
-            .with_max_body_bytes(HTTP_MAX_BODY_BYTES)
-            .route(
-                "/v1/query/gamers",
-                move |_ctx, request: pb::GamerInfoReq| {
+        let redis = xredis::Client::connect_config(xredis::RedisConfig::new(&config.infrastructure.redis_dsn)?).await?;
+        let mongo = match xmongo::Client::connect_config(xmongo::Config::new(&config.infrastructure.mongo_dsn)?).await {
+            Ok(mongo) => mongo,
+            Err(error) => {
+                redis.close();
+                return Err(error.into());
+            }
+        };
+        let result: Result<(), ServiceError> = async {
+            let mut prepared = xframe::prepare(service_config).await?;
+            let handle = prepared.handle();
+            let database = xkk_persist::Database::new(mongo.clone())?;
+            let api = QueryApi::new(database.players());
+            let ready_handle = handle.clone();
+            let gamer_info = api.clone();
+            let http = xframe::xhttp::App::new()
+                .with_max_body_bytes(HTTP_MAX_BODY_BYTES)
+                .route("/v1/query/gamers", move |_ctx, request: pb::GamerInfoReq| {
                     let api = gamer_info.clone();
                     async move { Ok(api.gamer_info(request).await) }
-                },
-            )?
-            .get("/healthz", |_| async { xframe::xhttp::StatusCode::OK })?
-            .get("/readyz", move |_| {
-                let frame = ready_handle.clone();
-                async move {
-                    if frame.state() == FrameState::Running {
-                        xframe::xhttp::StatusCode::OK
-                    } else {
-                        xframe::xhttp::StatusCode::SERVICE_UNAVAILABLE
+                })?
+                .get("/healthz", |_| async { xframe::xhttp::StatusCode::OK })?
+                .get("/readyz", move |_| {
+                    let frame = ready_handle.clone();
+                    async move {
+                        if frame.state() == FrameState::Running {
+                            xframe::xhttp::StatusCode::OK
+                        } else {
+                            xframe::xhttp::StatusCode::SERVICE_UNAVAILABLE
+                        }
                     }
-                }
-            })?;
-        prepared.set_http_app(http)?;
-        let frame = prepared
-            .start(QueryApplication::new(METRICS_REPORT_INTERVAL, api))
-            .await?;
-        tracing::info!(instance_id, "Query service started");
-        let shutdown = frame.run_until_shutdown_signal().await;
-        tracing::info!(
-            instance_id,
-            success = shutdown.is_ok(),
-            "Query service stopped"
-        );
-        shutdown?;
-        Ok(())
+                })?;
+            prepared.set_http_app(http_addr, http)?;
+            let frame = prepared.start(QueryApplication::new(METRICS_REPORT_INTERVAL, api)).await?;
+            tracing::info!(instance_id, "Query service started");
+            let shutdown = frame.run_until_shutdown_signal().await;
+            tracing::info!(instance_id, success = shutdown.is_ok(), "Query service stopped");
+            shutdown?;
+            Ok(())
+        }
+        .await;
+        mongo.shutdown().await;
+        redis.close();
+        result
     }
     .await;
     let log_close = log_guard.close().await;
@@ -143,11 +132,7 @@ struct QueryApplication {
 
 impl QueryApplication {
     fn new(metrics_interval: Duration, api: QueryApi) -> Self {
-        Self {
-            metrics_interval,
-            api,
-            metrics_task: None,
-        }
+        Self { metrics_interval, api, metrics_task: None }
     }
 }
 
@@ -204,21 +189,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn example_config_builds_http_only_frame() {
+    fn example_config_builds_query_service_runtime() {
         let config = Config::parse(
             include_str!("../../../config/common.yaml"),
             include_str!("../../../config/query.yaml"),
             include_str!("../../../config/version.json"),
         )
         .unwrap();
-        let frame = frame_config(&config).unwrap();
+        let frame = service_config(&config).unwrap();
 
-        assert!(frame.http.is_some());
         assert!(frame.service_server.is_none());
-        assert_eq!(
-            frame.rpc,
-            RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)
-        );
+        assert_eq!(frame.rpc, RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY));
         assert_eq!(frame.node.meta_data().get("protocol").unwrap(), "http");
     }
 }

@@ -15,12 +15,12 @@ use xframe::{
     xproto::cs::{CsHead, CsPacket},
     xproto::{RequestMessage, WireMessage},
     xrpc::{JsonMessage, RpcManager},
-    xservice::{NetStatus, ServiceStatus},
 };
 use xkk_cache::{OnlineData, clear_gate_by_session, load_online, save_online};
 use xkk_common::{unix_millis, unix_seconds};
 use xkk_protocol::{MsgId, RouteTarget, code, error_status, from_u16, ok_status, pb, route_target};
 use xtoken::TokenCoder;
+use xutil::{NetStatus, ServiceStatus};
 
 use crate::{
     session::{ClientSessions, RequestError, ResumeError, Routes, SendError, encode_direct},
@@ -50,15 +50,12 @@ impl Gateway {
     pub fn new(
         frame: FrameHandle,
         rpc: RpcManager,
-        redis: xframe::xredis::Client,
+        redis: xredis::Client,
         sessions: ClientSessions,
         online_count: Arc<AtomicI32>,
         settings: GatewaySettings,
     ) -> Self {
-        assert!(
-            settings.token_expire_seconds > 0,
-            "Gate token expiry must be positive"
-        );
+        assert!(settings.token_expire_seconds > 0, "Gate token expiry must be positive");
         Self {
             state: Arc::new(GatewayState {
                 frame,
@@ -108,13 +105,7 @@ impl Gateway {
 
     pub async fn shutdown(&self) {
         self.state.draining.store(true, Ordering::Release);
-        let workers = self
-            .workers
-            .lock()
-            .expect("Gate worker map poisoned")
-            .drain()
-            .map(|(_, worker)| worker)
-            .collect::<Vec<_>>();
+        let workers = self.workers.lock().expect("Gate worker map poisoned").drain().map(|(_, worker)| worker).collect::<Vec<_>>();
         for worker in &workers {
             worker.conn.close();
         }
@@ -163,11 +154,7 @@ impl GatewayState {
             .send_server(
                 xkk_common::service_type::LOGIC,
                 session.routes.logic_id,
-                &pb::LogicDisconnectNtf {
-                    gid: session.gid,
-                    gate_id: self.gate_id,
-                    player_session: session.session_id,
-                },
+                &pb::LogicDisconnectNtf { gid: session.gid, gate_id: self.gate_id, player_session: session.session_id },
             )
             .await
         {
@@ -178,10 +165,7 @@ impl GatewayState {
                 "Gate shutdown Logic disconnect notification failed"
             );
         }
-        if let Err(error) =
-            clear_gate_by_session(&self.redis, session.gid, session.session_id, unix_seconds())
-                .await
-        {
+        if let Err(error) = clear_gate_by_session(&self.redis, session.gid, session.session_id, unix_seconds()).await {
             tracing::warn!(
                 gid = session.gid,
                 session_id = session.session_id,
@@ -212,14 +196,7 @@ impl Handler for Gateway {
             }
         });
 
-        let old = workers.insert(
-            session_id,
-            ClientWorker {
-                sender,
-                task,
-                conn: conn.clone(),
-            },
-        );
+        let old = workers.insert(session_id, ClientWorker { sender, task, conn: conn.clone() });
         assert!(old.is_none(), "Gate session worker registered twice");
         tracing::info!(
             session_id,
@@ -233,12 +210,7 @@ impl Handler for Gateway {
             frame.conn.close();
             return;
         }
-        let sender = self
-            .workers
-            .lock()
-            .expect("Gate worker map poisoned")
-            .get(&frame.session_id)
-            .map(|worker| worker.sender.clone());
+        let sender = self.workers.lock().expect("Gate worker map poisoned").get(&frame.session_id).map(|worker| worker.sender.clone());
         let Some(sender) = sender else {
             frame.conn.close();
             return;
@@ -256,12 +228,7 @@ impl Handler for Gateway {
     }
 
     fn on_disconnected(&self, conn: Connection) {
-        if let Some(worker) = self
-            .workers
-            .lock()
-            .expect("Gate worker map poisoned")
-            .remove(&conn.session_id())
-        {
+        if let Some(worker) = self.workers.lock().expect("Gate worker map poisoned").remove(&conn.session_id()) {
             worker.task.abort();
         }
         if self.draining() {
@@ -283,7 +250,7 @@ struct ClientWorker {
 struct GatewayState {
     frame: FrameHandle,
     rpc: RpcManager,
-    redis: xframe::xredis::Client,
+    redis: xredis::Client,
     sessions: ClientSessions,
     token: TokenCoder,
     gate_id: i32,
@@ -308,11 +275,7 @@ impl GatewayState {
             }
         };
         let Some(msgid) = from_u16(packet.head.msgid) else {
-            tracing::warn!(
-                session_id = frame.session_id,
-                msgid = packet.head.msgid,
-                "Gate rejected unknown client message"
-            );
+            tracing::warn!(session_id = frame.session_id, msgid = packet.head.msgid, "Gate rejected unknown client message");
             frame.conn.close();
             return;
         };
@@ -327,116 +290,58 @@ impl GatewayState {
                 let Some(request) = decode::<pb::PlayerInfoReq>(&frame, packet.body) else {
                     return;
                 };
-                self.forward(
-                    &frame,
-                    packet.head,
-                    RouteTarget::Logic,
-                    MsgId::PlayerInfoReq,
-                    MsgId::PlayerInfoRsp,
-                    request,
-                    |status| pb::PlayerInfoRsp {
-                        status: Some(status),
-                        ..Default::default()
-                    },
-                )
+                self.forward(&frame, packet.head, RouteTarget::Logic, MsgId::PlayerInfoReq, MsgId::PlayerInfoRsp, request, |status| {
+                    pb::PlayerInfoRsp { status: Some(status), ..Default::default() }
+                })
                 .await;
             }
             MsgId::UseItemReq => {
                 let Some(request) = decode::<pb::UseItemReq>(&frame, packet.body) else {
                     return;
                 };
-                self.forward(
-                    &frame,
-                    packet.head,
-                    RouteTarget::Logic,
-                    MsgId::UseItemReq,
-                    MsgId::UseItemRsp,
-                    request,
-                    |status| pb::UseItemRsp {
-                        status: Some(status),
-                        ..Default::default()
-                    },
-                )
+                self.forward(&frame, packet.head, RouteTarget::Logic, MsgId::UseItemReq, MsgId::UseItemRsp, request, |status| {
+                    pb::UseItemRsp { status: Some(status), ..Default::default() }
+                })
                 .await;
             }
             MsgId::MailListReq => {
                 let Some(request) = decode::<pb::MailListReq>(&frame, packet.body) else {
                     return;
                 };
-                self.forward(
-                    &frame,
-                    packet.head,
-                    RouteTarget::Public,
-                    MsgId::MailListReq,
-                    MsgId::MailListRsp,
-                    request,
-                    |status| pb::MailListRsp {
-                        status: Some(status),
-                        ..Default::default()
-                    },
-                )
+                self.forward(&frame, packet.head, RouteTarget::Public, MsgId::MailListReq, MsgId::MailListRsp, request, |status| {
+                    pb::MailListRsp { status: Some(status), ..Default::default() }
+                })
                 .await;
             }
             MsgId::MailReadReq => {
                 let Some(request) = decode::<pb::MailReadReq>(&frame, packet.body) else {
                     return;
                 };
-                self.forward(
-                    &frame,
-                    packet.head,
-                    RouteTarget::Public,
-                    MsgId::MailReadReq,
-                    MsgId::MailReadRsp,
-                    request,
-                    |status| pb::MailReadRsp {
-                        status: Some(status),
-                        ..Default::default()
-                    },
-                )
+                self.forward(&frame, packet.head, RouteTarget::Public, MsgId::MailReadReq, MsgId::MailReadRsp, request, |status| {
+                    pb::MailReadRsp { status: Some(status), ..Default::default() }
+                })
                 .await;
             }
             MsgId::MailDeleteReq => {
                 let Some(request) = decode::<pb::MailDeleteReq>(&frame, packet.body) else {
                     return;
                 };
-                self.forward(
-                    &frame,
-                    packet.head,
-                    RouteTarget::Public,
-                    MsgId::MailDeleteReq,
-                    MsgId::MailDeleteRsp,
-                    request,
-                    |status| pb::MailDeleteRsp {
-                        status: Some(status),
-                        ..Default::default()
-                    },
-                )
+                self.forward(&frame, packet.head, RouteTarget::Public, MsgId::MailDeleteReq, MsgId::MailDeleteRsp, request, |status| {
+                    pb::MailDeleteRsp { status: Some(status), ..Default::default() }
+                })
                 .await;
             }
             MsgId::MailClaimReq => {
                 let Some(request) = decode::<pb::MailClaimReq>(&frame, packet.body) else {
                     return;
                 };
-                self.forward(
-                    &frame,
-                    packet.head,
-                    RouteTarget::Public,
-                    MsgId::MailClaimReq,
-                    MsgId::MailClaimRsp,
-                    request,
-                    |status| pb::MailClaimRsp {
-                        status: Some(status),
-                        ..Default::default()
-                    },
-                )
+                self.forward(&frame, packet.head, RouteTarget::Public, MsgId::MailClaimReq, MsgId::MailClaimRsp, request, |status| {
+                    pb::MailClaimRsp { status: Some(status), ..Default::default() }
+                })
                 .await;
             }
             _ => {
-                tracing::warn!(
-                    session_id = frame.session_id,
-                    msgid = msgid.as_u16(),
-                    "Gate rejected non-request client message"
-                );
+                tracing::warn!(session_id = frame.session_id, msgid = msgid.as_u16(), "Gate rejected non-request client message");
                 frame.conn.close();
             }
         }
@@ -450,17 +355,7 @@ impl GatewayState {
             frame.conn.close();
             return;
         };
-        if self
-            .sessions
-            .acknowledge(
-                gid,
-                frame.session_id,
-                packet.head.seq,
-                packet.head.ack,
-                Instant::now(),
-            )
-            .is_err()
-        {
+        if self.sessions.acknowledge(gid, frame.session_id, packet.head.seq, packet.head.ack, Instant::now()).is_err() {
             frame.conn.close();
         }
     }
@@ -469,32 +364,12 @@ impl GatewayState {
         let Some(request) = decode::<pb::PingReq>(frame, packet.body) else {
             return;
         };
-        let response = pb::PingRsp {
-            status: Some(ok_status()),
-            client_time_ms: request.client_time_ms,
-            server_time_ms: unix_millis(),
-        };
+        let response = pb::PingRsp { status: Some(ok_status()), client_time_ms: request.client_time_ms, server_time_ms: unix_millis() };
         let Some(gid) = frame.conn.user_id() else {
-            self.send_direct(
-                &frame.conn,
-                MsgId::PingRsp,
-                packet.head.seq,
-                &response,
-                false,
-            );
+            self.send_direct(&frame.conn, MsgId::PingRsp, packet.head.seq, &response, false);
             return;
         };
-        if self
-            .sessions
-            .acknowledge(
-                gid,
-                frame.session_id,
-                packet.head.seq,
-                packet.head.ack,
-                Instant::now(),
-            )
-            .is_err()
-        {
+        if self.sessions.acknowledge(gid, frame.session_id, packet.head.seq, packet.head.ack, Instant::now()).is_err() {
             frame.conn.close();
             return;
         }
@@ -512,55 +387,31 @@ impl GatewayState {
             || request.device_id.len() < 8
             || packet.head.seq == 0
         {
-            self.reject_login(
-                &frame.conn,
-                packet.head.seq,
-                error_status(code::INVALID_ARGUMENT, "invalid login request"),
-            );
+            self.reject_login(&frame.conn, packet.head.seq, error_status(code::INVALID_ARGUMENT, "invalid login request"));
             return;
         }
 
-        let Some(mut online) = self
-            .verify_online(request.gid, &request.token, &request.device_id)
-            .await
-        else {
-            self.reject_login(
-                &frame.conn,
-                packet.head.seq,
-                error_status(code::UNAUTHENTICATED, "token verification failed"),
-            );
+        let Some(mut online) = self.verify_online(request.gid, &request.token, &request.device_id).await else {
+            self.reject_login(&frame.conn, packet.head.seq, error_status(code::UNAUTHENTICATED, "token verification failed"));
             return;
         };
         let route_started = Instant::now();
         let logic_id = match self.select_logic(&online) {
             Some(logic_id) => logic_id,
             None => {
-                self.reject_login(
-                    &frame.conn,
-                    packet.head.seq,
-                    error_status(code::TEMPORARILY_UNAVAILABLE, "Logic unavailable"),
-                );
+                self.reject_login(&frame.conn, packet.head.seq, error_status(code::TEMPORARILY_UNAVAILABLE, "Logic unavailable"));
                 return;
             }
         };
-        let public_id = match self
-            .frame
-            .pick_by_hash(xkk_common::service_type::PUBLIC, request.gid)
-        {
+        let public_id = match self.frame.pick_by_hash(xkk_common::service_type::PUBLIC, request.gid) {
             Ok(instance) => instance.instance_id,
             Err(error) => {
                 tracing::warn!(gid = request.gid, %error, "Gate Public selection failed");
-                self.reject_login(
-                    &frame.conn,
-                    packet.head.seq,
-                    error_status(code::TEMPORARILY_UNAVAILABLE, "Public unavailable"),
-                );
+                self.reject_login(&frame.conn, packet.head.seq, error_status(code::TEMPORARILY_UNAVAILABLE, "Public unavailable"));
                 return;
             }
         };
-        self.login_metrics
-            .route_select
-            .record(route_started.elapsed());
+        self.login_metrics.route_select.record(route_started.elapsed());
 
         let logic_request = pb::LogicLoginReq {
             gid: request.gid,
@@ -569,60 +420,38 @@ impl GatewayState {
             device_id: request.device_id.clone(),
             reconnect: false,
         };
-        let route = xkk_common::RouteIdentity::from_signed(request.gid, frame.session_id)
-            .expect("validated login route is positive");
+        let route = xkk_common::RouteIdentity::from_signed(request.gid, frame.session_id).expect("validated login route is positive");
         let rpc_started = Instant::now();
         let logic_response = self
             .frame
-            .call_routed_to(
-                xkk_common::service_type::LOGIC,
-                logic_id,
-                route.key(),
-                route.session(),
-                &logic_request,
-                self.rpc_timeout,
-            )
+            .call_routed_to(xkk_common::service_type::LOGIC, logic_id, route.key(), route.session(), &logic_request, self.rpc_timeout)
             .await;
         self.login_metrics.logic_rpc.record(rpc_started.elapsed());
         let logic_response: pb::LogicLoginRsp = match logic_response {
             Ok(response) => response,
             Err(error) => {
                 tracing::warn!(gid = request.gid, logic_id, %error, "Gate Logic login RPC failed");
-                self.reject_login(
-                    &frame.conn,
-                    packet.head.seq,
-                    error_status(code::TEMPORARILY_UNAVAILABLE, "Logic login failed"),
-                );
+                self.reject_login(&frame.conn, packet.head.seq, error_status(code::TEMPORARILY_UNAVAILABLE, "Logic login failed"));
                 return;
             }
         };
-        let status = logic_response
-            .status
-            .clone()
-            .unwrap_or_else(|| error_status(code::INTERNAL, "Logic login response has no status"));
+        let status = logic_response.status.clone().unwrap_or_else(|| error_status(code::INTERNAL, "Logic login response has no status"));
         if status.code != code::OK {
             self.reject_login(&frame.conn, packet.head.seq, status);
             return;
         }
 
         let bind_started = Instant::now();
-        let routes = Routes {
-            logic_id,
-            public_id,
-        };
+        let routes = Routes { logic_id, public_id };
         if !frame.conn.bind_user(request.gid) || frame.conn.is_closed() {
             frame.conn.close();
             return;
         }
-        let became_active =
-            self.sessions
-                .install_login(request.gid, frame.conn.clone(), routes, packet.head.seq);
+        let became_active = self.sessions.install_login(request.gid, frame.conn.clone(), routes, packet.head.seq);
         if became_active {
             self.online_count.fetch_add(1, Ordering::AcqRel);
         }
-        self.login_metrics
-            .session_bind
-            .record(bind_started.elapsed());
+        self.login_metrics.session_bind.record(bind_started.elapsed());
 
         online.session = frame.session_id;
         online.login_time = unix_seconds();
@@ -632,18 +461,10 @@ impl GatewayState {
         online.logic_id = logic_id;
         let save_started = Instant::now();
         let save_result = save_online(&self.redis, &online).await;
-        self.login_metrics
-            .redis_save_online
-            .record(save_started.elapsed());
+        self.login_metrics.redis_save_online.record(save_started.elapsed());
         if let Err(error) = save_result {
             tracing::error!(gid = request.gid, %error, "Gate online save failed after login");
-            self.kick_local(
-                request.gid,
-                frame.session_id,
-                code::INTERNAL,
-                "online save failed",
-            )
-            .await;
+            self.kick_local(request.gid, frame.session_id, code::INTERNAL, "online save failed").await;
             return;
         }
 
@@ -658,9 +479,7 @@ impl GatewayState {
             session_id: frame.session_id,
         };
         self.send_bound(request.gid, frame.session_id, MsgId::LoginRsp, &response);
-        self.login_metrics
-            .response_send
-            .record(send_started.elapsed());
+        self.login_metrics.response_send.record(send_started.elapsed());
         self.login_metrics.total.record(total_started.elapsed());
     }
 
@@ -676,49 +495,27 @@ impl GatewayState {
             || request.ack != packet.head.ack
             || packet.head.seq == 0
         {
-            self.reject_reconnect(
-                &frame.conn,
-                packet.head.seq,
-                error_status(code::INVALID_ARGUMENT, "invalid reconnect request"),
-            );
+            self.reject_reconnect(&frame.conn, packet.head.seq, error_status(code::INVALID_ARGUMENT, "invalid reconnect request"));
             return;
         }
-        let Some(mut online) = self
-            .verify_online(request.gid, &request.token, &request.device_id)
-            .await
-        else {
-            self.reject_reconnect(
-                &frame.conn,
-                packet.head.seq,
-                error_status(code::UNAUTHENTICATED, "token verification failed"),
-            );
+        let Some(mut online) = self.verify_online(request.gid, &request.token, &request.device_id).await else {
+            self.reject_reconnect(&frame.conn, packet.head.seq, error_status(code::UNAUTHENTICATED, "token verification failed"));
             return;
         };
-        let routes = match self.sessions.authorize_reconnect(
-            request.gid,
-            request.previous_session,
-            packet.head.seq,
-            request.ack,
-            Instant::now(),
-        ) {
-            Ok(routes) => routes,
-            Err(error) => {
-                let status = match error {
-                    ResumeError::RateLimited => {
-                        error_status(code::RATE_LIMITED, "reconnect rate exceeded")
-                    }
-                    _ => error_status(code::RESUME_EXPIRED, "resume state expired"),
-                };
-                self.reject_reconnect(&frame.conn, packet.head.seq, status);
-                return;
-            }
-        };
+        let routes =
+            match self.sessions.authorize_reconnect(request.gid, request.previous_session, packet.head.seq, request.ack, Instant::now()) {
+                Ok(routes) => routes,
+                Err(error) => {
+                    let status = match error {
+                        ResumeError::RateLimited => error_status(code::RATE_LIMITED, "reconnect rate exceeded"),
+                        _ => error_status(code::RESUME_EXPIRED, "resume state expired"),
+                    };
+                    self.reject_reconnect(&frame.conn, packet.head.seq, status);
+                    return;
+                }
+            };
         if online.logic_id != routes.logic_id {
-            self.reject_reconnect(
-                &frame.conn,
-                packet.head.seq,
-                error_status(code::RESUME_EXPIRED, "Logic ownership changed"),
-            );
+            self.reject_reconnect(&frame.conn, packet.head.seq, error_status(code::RESUME_EXPIRED, "Logic ownership changed"));
             return;
         }
 
@@ -729,8 +526,7 @@ impl GatewayState {
             device_id: request.device_id,
             reconnect: true,
         };
-        let route = xkk_common::RouteIdentity::from_signed(request.gid, frame.session_id)
-            .expect("validated reconnect route is positive");
+        let route = xkk_common::RouteIdentity::from_signed(request.gid, frame.session_id).expect("validated reconnect route is positive");
         let logic_response: pb::LogicLoginRsp = match self
             .frame
             .call_routed_to(
@@ -746,17 +542,11 @@ impl GatewayState {
             Ok(response) => response,
             Err(error) => {
                 tracing::warn!(gid = request.gid, %error, "Gate Logic reconnect RPC failed");
-                self.reject_reconnect(
-                    &frame.conn,
-                    packet.head.seq,
-                    error_status(code::TEMPORARILY_UNAVAILABLE, "Logic reconnect failed"),
-                );
+                self.reject_reconnect(&frame.conn, packet.head.seq, error_status(code::TEMPORARILY_UNAVAILABLE, "Logic reconnect failed"));
                 return;
             }
         };
-        let status = logic_response.status.unwrap_or_else(|| {
-            error_status(code::INTERNAL, "Logic reconnect response has no status")
-        });
+        let status = logic_response.status.unwrap_or_else(|| error_status(code::INTERNAL, "Logic reconnect response has no status"));
         if status.code != code::OK {
             self.reject_reconnect(&frame.conn, packet.head.seq, status);
             return;
@@ -791,13 +581,7 @@ impl GatewayState {
         online.gate_id = self.gate_id;
         if let Err(error) = save_online(&self.redis, &online).await {
             tracing::error!(gid = request.gid, %error, "Gate online save failed after reconnect");
-            self.kick_local(
-                request.gid,
-                frame.session_id,
-                code::INTERNAL,
-                "online save failed",
-            )
-            .await;
+            self.kick_local(request.gid, frame.session_id, code::INTERNAL, "online save failed").await;
             return;
         }
 
@@ -809,27 +593,13 @@ impl GatewayState {
                     %error,
                     "Gate reconnect replay send failed"
                 );
-                self.kick_local(
-                    request.gid,
-                    frame.session_id,
-                    code::OVERLOADED,
-                    "replay queue full",
-                )
-                .await;
+                self.kick_local(request.gid, frame.session_id, code::OVERLOADED, "replay queue full").await;
                 return;
             }
         }
-        let response = pb::ReconnectRsp {
-            status: Some(ok_status()),
-            replayed: reconnect.replay.len() as u32,
-            session_id: frame.session_id,
-        };
-        self.send_bound(
-            request.gid,
-            frame.session_id,
-            MsgId::ReconnectRsp,
-            &response,
-        );
+        let response =
+            pb::ReconnectRsp { status: Some(ok_status()), replayed: reconnect.replay.len() as u32, session_id: frame.session_id };
+        self.send_bound(request.gid, frame.session_id, MsgId::ReconnectRsp, &response);
     }
 
     async fn handle_logout(&self, frame: &NetFrame, packet: CsPacket<'_>) {
@@ -840,22 +610,14 @@ impl GatewayState {
             frame.conn.close();
             return;
         };
-        let routes = match self.sessions.accept_request(
-            gid,
-            frame.session_id,
-            packet.head.seq,
-            packet.head.ack,
-            Instant::now(),
-        ) {
+        let routes = match self.sessions.accept_request(gid, frame.session_id, packet.head.seq, packet.head.ack, Instant::now()) {
             Ok(routes) => routes,
             Err(RequestError::RateLimited) => {
                 self.send_bound(
                     gid,
                     frame.session_id,
                     MsgId::LogoutRsp,
-                    &pb::LogoutRsp {
-                        status: Some(error_status(code::RATE_LIMITED, "request rate exceeded")),
-                    },
+                    &pb::LogoutRsp { status: Some(error_status(code::RATE_LIMITED, "request rate exceeded")) },
                 );
                 return;
             }
@@ -865,14 +627,7 @@ impl GatewayState {
             }
         };
 
-        self.send_bound(
-            gid,
-            frame.session_id,
-            MsgId::LogoutRsp,
-            &pb::LogoutRsp {
-                status: Some(ok_status()),
-            },
-        );
+        self.send_bound(gid, frame.session_id, MsgId::LogoutRsp, &pb::LogoutRsp { status: Some(ok_status()) });
         self.sessions.invalidate(gid, frame.session_id);
         self.decrement_online();
         let _ = self
@@ -880,11 +635,7 @@ impl GatewayState {
             .send_to(
                 xkk_common::service_type::LOGIC,
                 routes.logic_id,
-                &pb::LogicDisconnectNtf {
-                    gid,
-                    gate_id: self.gate_id,
-                    player_session: frame.session_id,
-                },
+                &pb::LogicDisconnectNtf { gid, gate_id: self.gate_id, player_session: frame.session_id },
             )
             .await;
         let _ = clear_gate_by_session(&self.redis, gid, frame.session_id, unix_seconds()).await;
@@ -912,17 +663,10 @@ impl GatewayState {
             frame.conn.close();
             return;
         };
-        let routes = match self.sessions.accept_request(
-            gid,
-            frame.session_id,
-            head.seq,
-            head.ack,
-            Instant::now(),
-        ) {
+        let routes = match self.sessions.accept_request(gid, frame.session_id, head.seq, head.ack, Instant::now()) {
             Ok(routes) => routes,
             Err(RequestError::RateLimited) => {
-                let response =
-                    make_error(error_status(code::RATE_LIMITED, "request rate exceeded"));
+                let response = make_error(error_status(code::RATE_LIMITED, "request rate exceeded"));
                 self.send_bound(gid, frame.session_id, response_msgid, &response);
                 return;
             }
@@ -942,54 +686,36 @@ impl GatewayState {
             RouteTarget::Gate => unreachable!("Gate-local messages are not forwarded"),
         };
         debug_assert_eq!(route_target(request_msgid), Some(target));
-        let route = xkk_common::RouteIdentity::from_signed(gid, frame.session_id)
-            .expect("bound request route is positive");
+        let route = xkk_common::RouteIdentity::from_signed(gid, frame.session_id).expect("bound request route is positive");
 
-        let response: Req::Response = match self
-            .frame
-            .call_routed_to(
-                service_type,
-                server_id,
-                route.key(),
-                route.session(),
-                &request,
-                self.rpc_timeout,
-            )
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::warn!(
-                    gid,
-                    session_id = frame.session_id,
-                    server_id,
-                    msgid = request_msgid.as_u16(),
-                    %error,
-                    "Gate business RPC failed"
-                );
-                make_error(error_status(
-                    code::TEMPORARILY_UNAVAILABLE,
-                    "target service unavailable",
-                ))
-            }
-        };
+        let response: Req::Response =
+            match self.frame.call_routed_to(service_type, server_id, route.key(), route.session(), &request, self.rpc_timeout).await {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::warn!(
+                        gid,
+                        session_id = frame.session_id,
+                        server_id,
+                        msgid = request_msgid.as_u16(),
+                        %error,
+                        "Gate business RPC failed"
+                    );
+                    make_error(error_status(code::TEMPORARILY_UNAVAILABLE, "target service unavailable"))
+                }
+            };
         self.send_bound(gid, frame.session_id, response_msgid, &response);
     }
 
     async fn verify_online(&self, gid: i64, token: &str, device_id: &str) -> Option<OnlineData> {
         let token_started = Instant::now();
         let decoded_gid = self.token.simple_token_decode(token, device_id).ok();
-        self.login_metrics
-            .token_decode
-            .record(token_started.elapsed());
+        self.login_metrics.token_decode.record(token_started.elapsed());
         if decoded_gid? != gid {
             return None;
         }
         let redis_started = Instant::now();
         let online = load_online(&self.redis, gid).await;
-        self.login_metrics
-            .redis_load_online
-            .record(redis_started.elapsed());
+        self.login_metrics.redis_load_online.record(redis_started.elapsed());
         let online = match online {
             Ok(Some(online)) => online,
             Ok(None) => return None,
@@ -1003,19 +729,10 @@ impl GatewayState {
 
     fn select_logic(&self, online: &OnlineData) -> Option<i32> {
         if online.logic_id == 0 {
-            return self
-                .frame
-                .pick_min_online_and_increment(xkk_common::service_type::LOGIC)
-                .ok()
-                .map(|instance| instance.instance_id);
+            return self.frame.pick_min_online_and_increment(xkk_common::service_type::LOGIC).ok().map(|instance| instance.instance_id);
         }
-        let instance = self
-            .frame
-            .service_instance(xkk_common::service_type::LOGIC, online.logic_id)
-            .ok()?;
-        (instance.enable
-            && instance.healthy == ServiceStatus::Health
-            && instance.net_status == NetStatus::Connected)
+        let instance = self.frame.service_instance(xkk_common::service_type::LOGIC, online.logic_id).ok()?;
+        (instance.enable && instance.healthy == ServiceStatus::Health && instance.net_status == NetStatus::Connected)
             .then_some(instance.instance_id)
     }
 
@@ -1034,19 +751,13 @@ impl GatewayState {
             .send_to(
                 xkk_common::service_type::LOGIC,
                 routes.logic_id,
-                &pb::LogicDisconnectNtf {
-                    gid,
-                    gate_id: self.gate_id,
-                    player_session: session_id,
-                },
+                &pb::LogicDisconnectNtf { gid, gate_id: self.gate_id, player_session: session_id },
             )
             .await
         {
             tracing::debug!(gid, session_id, %error, "Gate Logic disconnect notification failed");
         }
-        if let Err(error) =
-            clear_gate_by_session(&self.redis, gid, session_id, unix_seconds()).await
-        {
+        if let Err(error) = clear_gate_by_session(&self.redis, gid, session_id, unix_seconds()).await {
             tracing::warn!(gid, session_id, %error, "Gate Redis disconnect cleanup failed");
         }
         tracing::info!(gid, session_id, peer_addr = %conn.peer_addr(), "Gate client connection closed");
@@ -1054,33 +765,16 @@ impl GatewayState {
 
     async fn kick_session(&self, request: pb::KickSessionReq) -> pb::KickSessionRsp {
         if request.gid <= 0 || request.player_session <= 0 {
-            return pb::KickSessionRsp {
-                status: Some(error_status(code::INVALID_ARGUMENT, "invalid kick target")),
-                kicked: false,
-            };
+            return pb::KickSessionRsp { status: Some(error_status(code::INVALID_ARGUMENT, "invalid kick target")), kicked: false };
         }
-        let result = self.sessions.kick(
-            request.gid,
-            request.player_session,
-            request.code,
-            &request.reason,
-        );
+        let result = self.sessions.kick(request.gid, request.player_session, request.code, &request.reason);
         if result == Some(true) {
             self.decrement_online();
         }
         if result.is_some() {
-            let _ = clear_gate_by_session(
-                &self.redis,
-                request.gid,
-                request.player_session,
-                unix_seconds(),
-            )
-            .await;
+            let _ = clear_gate_by_session(&self.redis, request.gid, request.player_session, unix_seconds()).await;
         }
-        pb::KickSessionRsp {
-            status: Some(ok_status()),
-            kicked: result.is_some(),
-        }
+        pb::KickSessionRsp { status: Some(ok_status()), kicked: result.is_some() }
     }
 
     fn push_mail(&self, request: pb::MailPushNtf) {
@@ -1090,12 +784,7 @@ impl GatewayState {
         let Some(session_id) = self.sessions.current_session(request.gid) else {
             return;
         };
-        self.send_bound(
-            request.gid,
-            session_id,
-            MsgId::MailInfoNtf,
-            &pb::MailInfoNtf { mails: vec![mail] },
-        );
+        self.send_bound(request.gid, session_id, MsgId::MailInfoNtf, &pb::MailInfoNtf { mails: vec![mail] });
     }
 
     async fn kick_local(&self, gid: i64, session_id: SessionId, code: i32, reason: &str) {
@@ -1106,30 +795,11 @@ impl GatewayState {
     }
 
     fn reject_login(&self, conn: &Connection, ack: u32, status: pb::Status) {
-        self.send_direct(
-            conn,
-            MsgId::LoginRsp,
-            ack,
-            &pb::LoginRsp {
-                status: Some(status),
-                ..Default::default()
-            },
-            true,
-        );
+        self.send_direct(conn, MsgId::LoginRsp, ack, &pb::LoginRsp { status: Some(status), ..Default::default() }, true);
     }
 
     fn reject_reconnect(&self, conn: &Connection, ack: u32, status: pb::Status) {
-        self.send_direct(
-            conn,
-            MsgId::ReconnectRsp,
-            ack,
-            &pb::ReconnectRsp {
-                status: Some(status),
-                replayed: 0,
-                session_id: 0,
-            },
-            true,
-        );
+        self.send_direct(conn, MsgId::ReconnectRsp, ack, &pb::ReconnectRsp { status: Some(status), replayed: 0, session_id: 0 }, true);
     }
 
     fn send_direct<M>(&self, conn: &Connection, msgid: MsgId, ack: u32, message: &M, close: bool)
@@ -1159,12 +829,7 @@ impl GatewayState {
             match error {
                 SendError::SessionMismatch => {}
                 SendError::QueueFull => {
-                    tracing::warn!(
-                        gid,
-                        session_id,
-                        msgid = msgid.as_u16(),
-                        "Gate write queue full"
-                    );
+                    tracing::warn!(gid, session_id, msgid = msgid.as_u16(), "Gate write queue full");
                 }
                 SendError::Transport(error) => {
                     tracing::warn!(gid, session_id, msgid = msgid.as_u16(), %error, "Gate response send failed");
@@ -1177,11 +842,7 @@ impl GatewayState {
     }
 
     fn decrement_online(&self) {
-        let _ = self
-            .online_count
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                Some((current - 1).max(0))
-            });
+        let _ = self.online_count.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| Some((current - 1).max(0)));
     }
 }
 

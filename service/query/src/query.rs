@@ -17,10 +17,7 @@ pub(crate) struct QueryApi {
 
 impl QueryApi {
     pub fn new(players: PlayerStore) -> Self {
-        Self {
-            players,
-            inflight: Arc::new(Semaphore::new(MAX_INFLIGHT_REQUESTS)),
-        }
+        Self { players, inflight: Arc::new(Semaphore::new(MAX_INFLIGHT_REQUESTS)) }
     }
 
     pub fn available_request_slots(&self) -> usize {
@@ -29,18 +26,11 @@ impl QueryApi {
 
     pub async fn gamer_info(&self, request: pb::GamerInfoReq) -> pb::GamerInfoRsp {
         let Ok(_permit) = self.inflight.clone().try_acquire_owned() else {
-            tracing::error!(
-                limit = MAX_INFLIGHT_REQUESTS,
-                "Query inflight request hard limit exceeded"
-            );
+            tracing::error!(limit = MAX_INFLIGHT_REQUESTS, "Query inflight request hard limit exceeded");
             return gamer_info_error(code::OVERLOADED, "Query request capacity exhausted");
         };
         if request.gamer_ids.len() > MAX_GAMER_IDS {
-            tracing::error!(
-                requested = request.gamer_ids.len(),
-                limit = MAX_GAMER_IDS,
-                "Query gamer id hard limit exceeded"
-            );
+            tracing::error!(requested = request.gamer_ids.len(), limit = MAX_GAMER_IDS, "Query gamer id hard limit exceeded");
         }
         let Some(gamer_ids) = valid_gamer_ids(request.gamer_ids) else {
             return gamer_info_error(code::INVALID_ARGUMENT, "invalid gamer ids");
@@ -52,10 +42,7 @@ impl QueryApi {
                 return gamer_info_error(code::INTERNAL, "player load failed");
             }
         };
-        pb::GamerInfoRsp {
-            status: Some(ok_status()),
-            players,
-        }
+        pb::GamerInfoRsp { status: Some(ok_status()), players }
     }
 }
 
@@ -64,10 +51,7 @@ fn valid_gamer_ids(gamer_ids: Vec<i64>) -> Option<Vec<i64>> {
         return None;
     }
     let mut seen = HashSet::with_capacity(gamer_ids.len());
-    gamer_ids
-        .iter()
-        .all(|gid| *gid > 0 && seen.insert(*gid))
-        .then_some(gamer_ids)
+    gamer_ids.iter().all(|gid| *gid > 0 && seen.insert(*gid)).then_some(gamer_ids)
 }
 
 macro_rules! status_response {

@@ -76,7 +76,7 @@
 ## Configuration
 
 - Each service loads an explicitly selected role YAML plus sibling `common.yaml` and `version.json`
-  through `xkk-config`, then converts the composed role-specific type once into `xframe::FrameConfig`.
+  through `xkk-config`, then converts the composed role-specific type once into `xframe::ServiceConfig`.
 - Keep YAML for deployment-varying identity, listeners, DSNs, secrets, and typed log settings.
   Stable limits, windows, TTLs, timeouts, and task periods are commented hard constants in the
   module that enforces them; do not recreate generic top-level `runtime` or `capacity` buckets.

@@ -67,10 +67,9 @@ impl<E: fmt::Display> fmt::Display for ShutdownError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Persistence(error) => write!(f, "logic runtime flush failed: {error}"),
-            Self::PendingBudgetExceeded { capacity } => write!(
-                f,
-                "logic runtime flush pending-entry budget exceeded (capacity {capacity})"
-            ),
+            Self::PendingBudgetExceeded { capacity } => {
+                write!(f, "logic runtime flush pending-entry budget exceeded (capacity {capacity})")
+            }
             Self::DirtyPlayers(count) => {
                 write!(f, "logic runtime flush left {count} dirty players")
             }
@@ -139,39 +138,18 @@ impl LogicConfig {
     };
 
     fn validate(&self) {
-        assert!(
-            self.resident_capacity > 0,
-            "logic resident capacity must be greater than zero"
-        );
+        assert!(self.resident_capacity > 0, "logic resident capacity must be greater than zero");
         assert!(self.ttl > Duration::ZERO, "logic ttl must be non-zero");
-        assert!(
-            self.shards.is_power_of_two(),
-            "logic shard count must be a non-zero power of two"
-        );
-        assert!(
-            self.batch_save_count > 0,
-            "logic batch save count must be greater than zero"
-        );
-        assert!(
-            self.max_dirty_players > 0,
-            "logic dirty player limit must be greater than zero"
-        );
+        assert!(self.shards.is_power_of_two(), "logic shard count must be a non-zero power of two");
+        assert!(self.batch_save_count > 0, "logic batch save count must be greater than zero");
+        assert!(self.max_dirty_players > 0, "logic dirty player limit must be greater than zero");
         assert!(
             self.max_inflight_calls > 0 && self.max_inflight_calls as u64 <= ADMISSION_COUNT_MASK,
             "logic inflight call limit is invalid"
         );
-        assert!(
-            self.max_inflight_kib > 0,
-            "logic inflight KiB limit must be greater than zero"
-        );
-        assert!(
-            self.max_calls_per_gid > 0,
-            "logic per-gid call limit must be greater than zero"
-        );
-        assert!(
-            self.max_kib_per_gid > 0,
-            "logic per-gid KiB limit must be greater than zero"
-        );
+        assert!(self.max_inflight_kib > 0, "logic inflight KiB limit must be greater than zero");
+        assert!(self.max_calls_per_gid > 0, "logic per-gid call limit must be greater than zero");
+        assert!(self.max_kib_per_gid > 0, "logic per-gid KiB limit must be greater than zero");
     }
 }
 
@@ -181,9 +159,7 @@ pub struct LogicRuntime<P, E> {
 
 impl<P, E> Clone for LogicRuntime<P, E> {
     fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
+        Self { inner: self.inner.clone() }
     }
 }
 
@@ -198,42 +174,23 @@ impl<P: LogicState> PlayerCell<P> {
     fn new(id: u64, state: P, stats: &StatsInner) -> Self {
         let dirty = state.is_dirty();
         assert!(!dirty, "logic loader returned a dirty player");
-        let player = Self {
-            id,
-            state: Arc::new(Mutex::new(state)),
-            save_gate: AsyncMutex::new(()),
-            dirty_slot: AtomicBool::new(false),
-        };
+        let player = Self { id, state: Arc::new(Mutex::new(state)), save_gate: AsyncMutex::new(()), dirty_slot: AtomicBool::new(false) };
         stats.mark_dirty(id, dirty);
         player
     }
 
     fn dirty(&self) -> bool {
-        self.state
-            .lock()
-            .expect("logic player mutex poisoned")
-            .is_dirty()
+        self.state.lock().expect("logic player mutex poisoned").is_dirty()
     }
 
-    fn finish_logic(
-        &self,
-        reservation: Option<DirtyPermit>,
-        stats: &StatsInner,
-        dirty_admission: &DirtyAdmission,
-    ) -> bool {
+    fn finish_logic(&self, reservation: Option<DirtyPermit>, stats: &StatsInner, dirty_admission: &DirtyAdmission) -> bool {
         let dirty = self.dirty();
         if dirty && !self.has_dirty_slot() {
             let reservation = reservation.expect("logic dirty transition has no reservation");
-            assert!(
-                !self.dirty_slot.swap(true, Ordering::AcqRel),
-                "logic clean player already owns a dirty slot"
-            );
+            assert!(!self.dirty_slot.swap(true, Ordering::AcqRel), "logic clean player already owns a dirty slot");
             reservation.commit();
         } else {
-            assert!(
-                reservation.is_none() || !dirty,
-                "logic dirty player acquired a second dirty slot"
-            );
+            assert!(reservation.is_none() || !dirty, "logic dirty player acquired a second dirty slot");
         }
         self.refresh_dirty(stats, dirty_admission)
     }
@@ -241,10 +198,7 @@ impl<P: LogicState> PlayerCell<P> {
     fn refresh_dirty(&self, stats: &StatsInner, dirty_admission: &DirtyAdmission) -> bool {
         let dirty = self.dirty();
         if dirty {
-            assert!(
-                self.dirty_slot.load(Ordering::Acquire),
-                "logic dirty player has no dirty slot"
-            );
+            assert!(self.dirty_slot.load(Ordering::Acquire), "logic dirty player has no dirty slot");
         } else if self.dirty_slot.swap(false, Ordering::AcqRel) {
             dirty_admission.release();
         }
@@ -339,10 +293,7 @@ where
 {
     fn execute(self: Box<Self>, state: &mut P) -> Box<dyn Completion<E>> {
         let Self { logic, sender } = *self;
-        Box::new(TypedCompletion {
-            value: logic(state),
-            sender,
-        })
+        Box::new(TypedCompletion { value: logic(state), sender })
     }
 }
 
@@ -363,24 +314,14 @@ where
     E: Send + Sync + 'static,
 {
     fn prepare(self: Box<Self>, state: &P) -> CommandPreparation<P, E> {
-        let Self {
-            preload,
-            logic,
-            sender,
-        } = *self;
+        let Self { preload, logic, sender } = *self;
         let preload = preload(state);
         CommandPreparation::Preloading(Box::pin(async move {
             match preload.await {
-                Ok(value) => PreloadOutcome::Ready(Box::new(TypedPreparedCommand {
-                    value,
-                    logic,
-                    sender,
-                })
-                    as Box<dyn ReadyCommand<P, E>>),
-                Err(error) => PreloadOutcome::Failed(Box::new(TypedFailedCommand {
-                    error: LogicCallError::Preload(Arc::new(error)),
-                    sender,
-                })),
+                Ok(value) => PreloadOutcome::Ready(Box::new(TypedPreparedCommand { value, logic, sender }) as Box<dyn ReadyCommand<P, E>>),
+                Err(error) => {
+                    PreloadOutcome::Failed(Box::new(TypedFailedCommand { error: LogicCallError::Preload(Arc::new(error)), sender }))
+                }
             }
         }))
     }
@@ -404,15 +345,8 @@ where
     E: Send + Sync + 'static,
 {
     fn execute(self: Box<Self>, state: &mut P) -> Box<dyn Completion<E>> {
-        let Self {
-            value,
-            logic,
-            sender,
-        } = *self;
-        Box::new(TypedCompletion {
-            value: logic(state, value),
-            sender,
-        })
+        let Self { value, logic, sender } = *self;
+        Box::new(TypedCompletion { value: logic(state, value), sender })
     }
 }
 
@@ -442,10 +376,7 @@ where
     E: Send + Sync + 'static,
 {
     fn finish(self: Box<Self>, persistence: Result<(), Arc<E>>) {
-        let _ = self.sender.send(Ok(Completed {
-            value: self.value,
-            persistence,
-        }));
+        let _ = self.sender.send(Ok(Completed { value: self.value, persistence }));
     }
 }
 
@@ -466,11 +397,7 @@ impl Admission {
         }
     }
 
-    fn acquire(
-        self: &Arc<Self>,
-        retained_kib: u64,
-        stats: &StatsInner,
-    ) -> Result<GlobalPermit, RejectReason> {
+    fn acquire(self: &Arc<Self>, retained_kib: u64, stats: &StatsInner) -> Result<GlobalPermit, RejectReason> {
         loop {
             let current = self.calls.load(Ordering::Acquire);
             if current & ADMISSION_CLOSED != 0 {
@@ -481,22 +408,14 @@ impl Admission {
                 stats.rejected_calls.fetch_add(1, Ordering::Relaxed);
                 return Err(RejectReason::Calls);
             }
-            if self
-                .calls
-                .compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Relaxed)
-                .is_ok()
-            {
+            if self.calls.compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
                 break;
             }
         }
 
-        let kib_result = self
-            .kib
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
-                current
-                    .checked_add(retained_kib)
-                    .filter(|&next| next <= self.max_kib)
-            });
+        let kib_result = self.kib.fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
+            current.checked_add(retained_kib).filter(|&next| next <= self.max_kib)
+        });
         let previous_kib = match kib_result {
             Ok(previous) => previous,
             Err(_) => {
@@ -509,10 +428,7 @@ impl Admission {
         let calls = self.calls.load(Ordering::Relaxed) & ADMISSION_COUNT_MASK;
         update_high_water(&stats.inflight_calls_high_water, calls);
         update_high_water(&stats.inflight_kib_high_water, previous_kib + retained_kib);
-        Ok(GlobalPermit {
-            admission: self.clone(),
-            retained_kib,
-        })
+        Ok(GlobalPermit { admission: self.clone(), retained_kib })
     }
 
     fn close(&self) {
@@ -532,9 +448,7 @@ struct GlobalPermit {
 impl Drop for GlobalPermit {
     fn drop(&mut self) {
         self.admission.calls.fetch_sub(1, Ordering::Release);
-        self.admission
-            .kib
-            .fetch_sub(self.retained_kib, Ordering::Release);
+        self.admission.kib.fetch_sub(self.retained_kib, Ordering::Release);
     }
 }
 
@@ -545,24 +459,14 @@ struct DirtyAdmission {
 
 impl DirtyAdmission {
     fn new(max: usize) -> Self {
-        Self {
-            slots: AtomicU64::new(0),
-            max: max as u64,
-        }
+        Self { slots: AtomicU64::new(0), max: max as u64 }
     }
 
     fn acquire(self: &Arc<Self>, stats: &StatsInner) -> Option<DirtyPermit> {
-        let previous = self
-            .slots
-            .fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| {
-                (current < self.max).then_some(current + 1)
-            })
-            .ok()?;
+        let previous =
+            self.slots.fetch_update(Ordering::AcqRel, Ordering::Relaxed, |current| (current < self.max).then_some(current + 1)).ok()?;
         update_high_water(&stats.dirty_slots_high_water, previous + 1);
-        Some(DirtyPermit {
-            admission: self.clone(),
-            active: true,
-        })
+        Some(DirtyPermit { admission: self.clone(), active: true })
     }
 
     fn release(&self) {
@@ -673,29 +577,19 @@ where
                         gates.push(player.save_gate.lock().await);
                     }
 
-                    let dirty = entries
-                        .iter()
-                        .filter(|(_, player)| player.dirty())
-                        .map(|(gid, player)| (*gid, player.clone()))
-                        .collect::<Vec<_>>();
+                    let dirty =
+                        entries.iter().filter(|(_, player)| player.dirty()).map(|(gid, player)| (*gid, player.clone())).collect::<Vec<_>>();
                     if dirty.is_empty() {
                         return Ok(());
                     }
 
-                    stats
-                        .save_calls
-                        .fetch_add(dirty.len() as u64, Ordering::Relaxed);
+                    stats.save_calls.fetch_add(dirty.len() as u64, Ordering::Relaxed);
                     let started = Instant::now();
-                    let players = dirty
-                        .iter()
-                        .map(|(gid, player)| SavePlayer::new(*gid, player.state.clone()))
-                        .collect();
+                    let players = dirty.iter().map(|(gid, player)| SavePlayer::new(*gid, player.state.clone())).collect();
                     let result = batch_saver(players).await;
                     stats.save_latency.record(started.elapsed());
                     if result.is_err() {
-                        stats
-                            .save_failed
-                            .fetch_add(dirty.len() as u64, Ordering::Relaxed);
+                        stats.save_failed.fetch_add(dirty.len() as u64, Ordering::Relaxed);
                     }
                     for (_, player) in dirty {
                         player.refresh_dirty(&stats, &dirty_admission);
@@ -706,12 +600,8 @@ where
         }
 
         let cache = XlruCache::new(config.resident_capacity, options);
-        let directories = (0..config.shards)
-            .map(|_| DirectoryShard {
-                slots: Mutex::new(HashMap::new()),
-            })
-            .collect::<Vec<_>>()
-            .into_boxed_slice();
+        let directories =
+            (0..config.shards).map(|_| DirectoryShard { slots: Mutex::new(HashMap::new()) }).collect::<Vec<_>>().into_boxed_slice();
         let admission = Arc::new(Admission::new(&config));
 
         Self {
@@ -731,12 +621,7 @@ where
         }
     }
 
-    pub fn try_use<F, R>(
-        &self,
-        gid: i64,
-        retained_kib: usize,
-        logic: F,
-    ) -> Result<LogicCall<R, E>, RejectReason>
+    pub fn try_use<F, R>(&self, gid: i64, retained_kib: usize, logic: F) -> Result<LogicCall<R, E>, RejectReason>
     where
         F: FnOnce(&mut P) -> R + Send + 'static,
         R: Send + 'static,
@@ -761,8 +646,7 @@ where
         F: FnOnce(&mut P, A) -> R + Send + 'static,
         R: Send + 'static,
     {
-        self.inner
-            .try_use_preloaded(gid, retained_kib.max(1), preload, logic)
+        self.inner.try_use_preloaded(gid, retained_kib.max(1), preload, logic)
     }
 
     pub fn state(&self) -> RuntimeState {
@@ -783,12 +667,7 @@ where
     P: LogicState,
     E: Send + Sync + 'static,
 {
-    fn try_use<F, R>(
-        self: &Arc<Self>,
-        gid: i64,
-        retained_kib: usize,
-        logic: F,
-    ) -> Result<LogicCall<R, E>, RejectReason>
+    fn try_use<F, R>(self: &Arc<Self>, gid: i64, retained_kib: usize, logic: F) -> Result<LogicCall<R, E>, RejectReason>
     where
         F: FnOnce(&mut P) -> R + Send + 'static,
         R: Send + 'static,
@@ -813,39 +692,20 @@ where
         R: Send + 'static,
     {
         let (sender, receiver) = oneshot::channel();
-        let preload =
-            Box::new(move |state: &P| -> BoxFuture<Result<A, E>> { Box::pin(preload(state)) });
-        self.enqueue(
-            gid,
-            retained_kib,
-            Box::new(TypedPreloadedCommand {
-                preload,
-                logic,
-                sender,
-            }),
-        )?;
+        let preload = Box::new(move |state: &P| -> BoxFuture<Result<A, E>> { Box::pin(preload(state)) });
+        self.enqueue(gid, retained_kib, Box::new(TypedPreloadedCommand { preload, logic, sender }))?;
         Ok(LogicCall { receiver })
     }
 
-    fn enqueue(
-        self: &Arc<Self>,
-        gid: i64,
-        retained_kib: usize,
-        command: Box<dyn Command<P, E>>,
-    ) -> Result<(), RejectReason> {
+    fn enqueue(self: &Arc<Self>, gid: i64, retained_kib: usize, command: Box<dyn Command<P, E>>) -> Result<(), RejectReason> {
         let shard = self.directory(gid);
         let mut directory = shard.slots.lock().expect("logic directory mutex poisoned");
         let mut spawn_runner = false;
         let slot = match directory.get(&gid) {
             Some(slot) => slot.clone(),
             None => {
-                let slot = Arc::new(KeySlot {
-                    mailbox: Mutex::new(Mailbox {
-                        queue: VecDeque::new(),
-                        inflight_calls: 0,
-                        inflight_kib: 0,
-                    }),
-                });
+                let slot =
+                    Arc::new(KeySlot { mailbox: Mutex::new(Mailbox { queue: VecDeque::new(), inflight_calls: 0, inflight_kib: 0 }) });
                 directory.insert(gid, slot.clone());
                 spawn_runner = true;
                 slot
@@ -853,9 +713,7 @@ where
         };
         let mut mailbox = slot.mailbox.lock().expect("logic mailbox mutex poisoned");
 
-        if mailbox.inflight_calls >= self.config.max_calls_per_gid
-            || retained_kib > self.config.max_kib_per_gid - mailbox.inflight_kib
-        {
+        if mailbox.inflight_calls >= self.config.max_calls_per_gid || retained_kib > self.config.max_kib_per_gid - mailbox.inflight_kib {
             self.stats.rejected_gid.fetch_add(1, Ordering::Relaxed);
             if spawn_runner {
                 directory.remove(&gid);
@@ -874,12 +732,7 @@ where
         };
         mailbox.inflight_calls += 1;
         mailbox.inflight_kib += retained_kib;
-        mailbox.queue.push_back(Envelope {
-            command,
-            permit,
-            retained_kib,
-            submitted_at: Instant::now(),
-        });
+        mailbox.queue.push_back(Envelope { command, permit, retained_kib, submitted_at: Instant::now() });
         let queued = self.stats.queued.fetch_add(1, Ordering::Relaxed) + 1;
         update_high_water(&self.stats.queued_high_water, queued);
         self.stats.accepted.fetch_add(1, Ordering::Relaxed);
@@ -906,12 +759,7 @@ where
         let mut next = Some(self.take_next(gid, &slot));
 
         while let Some(envelope) = next {
-            let Envelope {
-                command,
-                permit,
-                retained_kib,
-                submitted_at,
-            } = envelope;
+            let Envelope { command, permit, retained_kib, submitted_at } = envelope;
             self.stats.queue_latency.record(submitted_at.elapsed());
             let run_started = Instant::now();
 
@@ -923,9 +771,7 @@ where
                         command.fail(map_cache_error(error));
                         self.stats.total_latency.record(submitted_at.elapsed());
                         self.stats.completed.fetch_add(1, Ordering::Relaxed);
-                        next = self
-                            .finish_envelope(gid, &slot, retained_kib, permit, None)
-                            .await;
+                        next = self.finish_envelope(gid, &slot, retained_kib, permit, None).await;
                         continue;
                     }
                 }
@@ -945,9 +791,7 @@ where
                         self.stats.run_latency.record(run_started.elapsed());
                         self.stats.total_latency.record(submitted_at.elapsed());
                         self.stats.completed.fetch_add(1, Ordering::Relaxed);
-                        next = self
-                            .finish_envelope(gid, &slot, retained_kib, permit, player.as_ref())
-                            .await;
+                        next = self.finish_envelope(gid, &slot, retained_kib, permit, player.as_ref()).await;
                         continue;
                     }
                 }
@@ -974,9 +818,7 @@ where
                             self.stats.total_latency.record(submitted_at.elapsed());
                             self.stats.completed.fetch_add(1, Ordering::Relaxed);
                             failure.finish();
-                            next = self
-                                .finish_envelope(gid, &slot, retained_kib, permit, player.as_ref())
-                                .await;
+                            next = self.finish_envelope(gid, &slot, retained_kib, permit, player.as_ref()).await;
                             continue;
                         }
                     }
@@ -989,15 +831,7 @@ where
             let dirty = current.finish_logic(dirty_reservation, &self.stats, &self.dirty_admission);
             self.stats.run_latency.record(run_started.elapsed());
             let persistence = if dirty {
-                save_one(
-                    &self.persistence,
-                    &self.stats,
-                    &self.dirty_admission,
-                    gid,
-                    current,
-                )
-                .await
-                .map_err(Arc::new)
+                save_one(&self.persistence, &self.stats, &self.dirty_admission, gid, current).await.map_err(Arc::new)
             } else {
                 Ok(())
             };
@@ -1006,50 +840,22 @@ where
             self.stats.total_latency.record(submitted_at.elapsed());
             self.stats.completed.fetch_add(1, Ordering::Relaxed);
 
-            next = self
-                .finish_envelope(gid, &slot, retained_kib, permit, player.as_ref())
-                .await;
+            next = self.finish_envelope(gid, &slot, retained_kib, permit, player.as_ref()).await;
         }
     }
 
     fn take_next(&self, gid: i64, slot: &Arc<KeySlot<P, E>>) -> Envelope<P, E> {
-        let directory = self
-            .directory(gid)
-            .slots
-            .lock()
-            .expect("logic directory mutex poisoned");
-        debug_assert!(
-            directory
-                .get(&gid)
-                .is_some_and(|current| Arc::ptr_eq(current, slot)),
-            "logic runner lost its directory slot"
-        );
+        let directory = self.directory(gid).slots.lock().expect("logic directory mutex poisoned");
+        debug_assert!(directory.get(&gid).is_some_and(|current| Arc::ptr_eq(current, slot)), "logic runner lost its directory slot");
         let mut mailbox = slot.mailbox.lock().expect("logic mailbox mutex poisoned");
-        let next = mailbox
-            .queue
-            .pop_front()
-            .expect("new logic runner must have one queued call");
+        let next = mailbox.queue.pop_front().expect("new logic runner must have one queued call");
         self.stats.queued.fetch_sub(1, Ordering::Relaxed);
         next
     }
 
-    fn complete_and_take_next(
-        &self,
-        gid: i64,
-        slot: &Arc<KeySlot<P, E>>,
-        retained_kib: usize,
-    ) -> Option<Envelope<P, E>> {
-        let directory = self
-            .directory(gid)
-            .slots
-            .lock()
-            .expect("logic directory mutex poisoned");
-        debug_assert!(
-            directory
-                .get(&gid)
-                .is_some_and(|current| Arc::ptr_eq(current, slot)),
-            "logic runner lost its directory slot"
-        );
+    fn complete_and_take_next(&self, gid: i64, slot: &Arc<KeySlot<P, E>>, retained_kib: usize) -> Option<Envelope<P, E>> {
+        let directory = self.directory(gid).slots.lock().expect("logic directory mutex poisoned");
+        debug_assert!(directory.get(&gid).is_some_and(|current| Arc::ptr_eq(current, slot)), "logic runner lost its directory slot");
         let mut mailbox = slot.mailbox.lock().expect("logic mailbox mutex poisoned");
         mailbox.inflight_calls -= 1;
         mailbox.inflight_kib -= retained_kib;
@@ -1086,10 +892,7 @@ where
         if let Some(player) = player {
             match self.cache.peek(&gid) {
                 Some(resident) => {
-                    assert!(
-                        Arc::ptr_eq(&resident, player),
-                        "logic cache contains a different active player generation"
-                    );
+                    assert!(Arc::ptr_eq(&resident, player), "logic cache contains a different active player generation");
                 }
                 None => {
                     let _ = self.cache.set_i64(gid, player.clone()).await;
@@ -1097,11 +900,7 @@ where
             }
         }
 
-        let mut directory = self
-            .directory(gid)
-            .slots
-            .lock()
-            .expect("logic directory mutex poisoned");
+        let mut directory = self.directory(gid).slots.lock().expect("logic directory mutex poisoned");
         let Some(current) = directory.get(&gid) else {
             unreachable!("logic runner directory slot disappeared before retirement");
         };
@@ -1177,24 +976,15 @@ where
             return Ok(());
         }
         self.admission.close();
-        self.state
-            .compare_exchange(
-                RuntimeState::Running as u8,
-                RuntimeState::Draining as u8,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .ok();
+        self.state.compare_exchange(RuntimeState::Running as u8, RuntimeState::Draining as u8, Ordering::AcqRel, Ordering::Acquire).ok();
 
         loop {
-            let drained = self.admission.inflight_calls() == 0
-                && self.stats.active_gids.load(Ordering::Acquire) == 0;
+            let drained = self.admission.inflight_calls() == 0 && self.stats.active_gids.load(Ordering::Acquire) == 0;
             if drained {
                 break;
             }
             let notified = self.drain_notify.notified();
-            let drained = self.admission.inflight_calls() == 0
-                && self.stats.active_gids.load(Ordering::Acquire) == 0;
+            let drained = self.admission.inflight_calls() == 0 && self.stats.active_gids.load(Ordering::Acquire) == 0;
             if drained {
                 break;
             }
@@ -1217,16 +1007,11 @@ where
             Ok(()) => {}
         }
 
-        let dirty = self
-            .stats
-            .dirty_players
-            .load(Ordering::Acquire)
-            .max(self.dirty_admission.slots());
+        let dirty = self.stats.dirty_players.load(Ordering::Acquire).max(self.dirty_admission.slots());
         if dirty != 0 {
             return Err(ShutdownError::DirtyPlayers(dirty));
         }
-        self.state
-            .store(RuntimeState::Stopped as u8, Ordering::Release);
+        self.state.store(RuntimeState::Stopped as u8, Ordering::Release);
         Ok(())
     }
 }

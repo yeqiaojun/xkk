@@ -1,4 +1,4 @@
-use xframe::xmongo::{
+use xmongo::{
     self, BsonPathGetter, Collection,
     mongodb::{
         bson::{Bson, Document, doc},
@@ -6,49 +6,26 @@ use xframe::xmongo::{
     },
 };
 
-pub(crate) async fn load_model<T>(
-    collection: &Collection<Document>,
-    id: impl Into<Bson>,
-) -> xmongo::Result<Option<T>>
+pub(crate) async fn load_model<T>(collection: &Collection<Document>, id: impl Into<Bson>) -> xmongo::Result<Option<T>>
 where
     T: BsonPathGetter,
 {
-    let document = collection
-        .find_one(doc! { "_id": id.into() })
-        .await
-        .map_err(xmongo::Error::from)?;
-    document
-        .map(|document| T::from_bson_value(&Bson::Document(document)))
-        .transpose()
+    let document = collection.find_one(doc! { "_id": id.into() }).await.map_err(xmongo::Error::from)?;
+    document.map(|document| T::from_bson_value(&Bson::Document(document))).transpose()
 }
 
-pub(crate) async fn save_model<T>(
-    collection: &Collection<Document>,
-    model: &T,
-) -> xmongo::Result<()>
+pub(crate) async fn save_model<T>(collection: &Collection<Document>, model: &T) -> xmongo::Result<()>
 where
     T: BsonPathGetter,
 {
-    let Bson::Document(document) = model.bson_value()? else {
-        unreachable!("xmongo generated models always encode to BSON documents")
-    };
-    let id = document
-        .get("_id")
-        .cloned()
-        .ok_or_else(|| xmongo::Error::InvalidBsonPath("_id".to_string()))?;
+    let Bson::Document(document) = model.bson_value()? else { unreachable!("xmongo generated models always encode to BSON documents") };
+    let id = document.get("_id").cloned().ok_or_else(|| xmongo::Error::InvalidBsonPath("_id".to_string()))?;
 
-    collection
-        .replace_one(doc! { "_id": id }, document)
-        .upsert(true)
-        .await
-        .map_err(xmongo::Error::from)?;
+    collection.replace_one(doc! { "_id": id }, document).upsert(true).await.map_err(xmongo::Error::from)?;
     Ok(())
 }
 
-pub(crate) async fn save_models<T>(
-    collection: &Collection<Document>,
-    models: impl IntoIterator<Item = T>,
-) -> xmongo::Result<usize>
+pub(crate) async fn save_models<T>(collection: &Collection<Document>, models: impl IntoIterator<Item = T>) -> xmongo::Result<usize>
 where
     T: BsonPathGetter,
 {
@@ -59,10 +36,7 @@ where
             let Bson::Document(document) = model.bson_value()? else {
                 unreachable!("xmongo generated models always encode to BSON documents")
             };
-            let id = document
-                .get("_id")
-                .cloned()
-                .ok_or_else(|| xmongo::Error::InvalidBsonPath("_id".to_string()))?;
+            let id = document.get("_id").cloned().ok_or_else(|| xmongo::Error::InvalidBsonPath("_id".to_string()))?;
             Ok::<WriteModel, xmongo::Error>(
                 ReplaceOneModel::builder()
                     .namespace(namespace.clone())
@@ -78,12 +52,6 @@ where
     if writes.is_empty() {
         return Ok(0);
     }
-    collection
-        .client()
-        .raw()
-        .bulk_write(writes)
-        .ordered(false)
-        .await
-        .map_err(xmongo::Error::from)?;
+    collection.client().raw().bulk_write(writes).ordered(false).await.map_err(xmongo::Error::from)?;
     Ok(count)
 }

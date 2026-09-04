@@ -7,8 +7,8 @@ edition.workspace = true
 dashmap.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-xframe.workspace = true
 xlru.workspace = true
+xmongo.workspace = true
 xkk-common.workspace = true
 xkk-protocol.workspace = true
 

@@ -55,13 +55,7 @@ impl HttpNodeConfig {
 
 impl HttpNode {
     pub(crate) fn validate(&self, service: &'static str) -> Result<()> {
-        validate_node(
-            service,
-            &self.cluster,
-            self.instance_id,
-            &self.advertise_host,
-            &self.listen_host,
-        )?;
+        validate_node(service, &self.cluster, self.instance_id, &self.advertise_host, &self.listen_host)?;
         if self.http_port == 0 {
             return Err(invalid(service, "node.http_port must be positive"));
         }
@@ -102,13 +96,7 @@ impl ServiceNodeConfig {
 
 impl ServiceNode {
     pub(crate) fn validate(&self, service: &'static str) -> Result<()> {
-        validate_node(
-            service,
-            &self.cluster,
-            self.instance_id,
-            &self.advertise_host,
-            &self.listen_host,
-        )?;
+        validate_node(service, &self.cluster, self.instance_id, &self.advertise_host, &self.listen_host)?;
         if self.service_port == 0 {
             return Err(invalid(service, "node.service_port must be positive"));
         }
@@ -135,24 +123,13 @@ pub(crate) struct GateNodeConfig {
 
 impl GateNodeConfig {
     pub(crate) fn compose(self, cluster: String) -> GateNode {
-        GateNode {
-            cluster,
-            instance_id: self.instance_id,
-            advertise_host: self.advertise_host,
-            listen_host: self.listen_host,
-        }
+        GateNode { cluster, instance_id: self.instance_id, advertise_host: self.advertise_host, listen_host: self.listen_host }
     }
 }
 
 impl GateNode {
     pub(crate) fn validate(&self, service: &'static str) -> Result<()> {
-        validate_node(
-            service,
-            &self.cluster,
-            self.instance_id,
-            &self.advertise_host,
-            &self.listen_host,
-        )
+        validate_node(service, &self.cluster, self.instance_id, &self.advertise_host, &self.listen_host)
     }
 }
 
@@ -189,13 +166,7 @@ impl Security {
     }
 }
 
-fn validate_node(
-    service: &'static str,
-    cluster: &str,
-    instance_id: i32,
-    advertise_host: &str,
-    listen_host: &str,
-) -> Result<()> {
+fn validate_node(service: &'static str, cluster: &str, instance_id: i32, advertise_host: &str, listen_host: &str) -> Result<()> {
     if cluster.is_empty() || advertise_host.is_empty() || listen_host.is_empty() {
         return Err(invalid(service, "node names and hosts must not be empty"));
     }

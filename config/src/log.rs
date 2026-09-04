@@ -46,10 +46,7 @@ impl LogSettings {
 
     pub(crate) fn validate(&self, service: &'static str) -> Result<()> {
         if self.async_queue_capacity == 0 {
-            return Err(invalid(
-                service,
-                "log.async_queue_capacity must be positive",
-            ));
+            return Err(invalid(service, "log.async_queue_capacity must be positive"));
         }
         Ok(())
     }

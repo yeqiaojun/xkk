@@ -71,11 +71,7 @@ pub struct LatencyRecorder {
 
 impl Default for LatencyRecorder {
     fn default() -> Self {
-        Self {
-            counts: std::array::from_fn(|_| AtomicU64::new(0)),
-            total_micros: AtomicU64::new(0),
-            max_micros: AtomicU64::new(0),
-        }
+        Self { counts: std::array::from_fn(|_| AtomicU64::new(0)), total_micros: AtomicU64::new(0), max_micros: AtomicU64::new(0) }
     }
 }
 

@@ -65,35 +65,15 @@ pub async fn login(config: &RobotConfig) -> Result<LoginResult> {
     login_gate(gate, config, gid, token, endpoint, deadline).await
 }
 
-async fn admit_role(
-    http: &JsonClient,
-    config: &RobotConfig,
-    gid: i64,
-    token: &str,
-    deadline: Instant,
-) -> Result<Vec<pb::Endpoint>> {
-    let request = pb::AuthUseRoleReq {
-        gid,
-        token: token.to_string(),
-        device_id: config.device_id.clone(),
-    };
+async fn admit_role(http: &JsonClient, config: &RobotConfig, gid: i64, token: &str, deadline: Instant) -> Result<Vec<pb::Endpoint>> {
+    let request = pb::AuthUseRoleReq { gid, token: token.to_string(), device_id: config.device_id.clone() };
 
     loop {
-        let response = post_json::<_, pb::AuthUseRoleRsp>(
-            http,
-            &config.auth_url,
-            USE_ROLE_PATH,
-            &request,
-            deadline,
-            "Auth use-role",
-        )
-        .await?;
+        let response =
+            post_json::<_, pb::AuthUseRoleRsp>(http, &config.auth_url, USE_ROLE_PATH, &request, deadline, "Auth use-role").await?;
         require_ok(response.status.as_ref(), "Auth use-role")?;
         if response.gid != gid {
-            return Err(failure(format!(
-                "Auth use-role returned gid {}, expected {gid}",
-                response.gid
-            )));
+            return Err(failure(format!("Auth use-role returned gid {}, expected {gid}", response.gid)));
         }
 
         let Some(queue) = response.queue else {
@@ -103,9 +83,7 @@ async fn admit_role(
             return Ok(response.endpoints);
         };
         if !response.endpoints.is_empty() {
-            return Err(failure(
-                "Auth use-role returned both queue state and Gate endpoints",
-            ));
+            return Err(failure("Auth use-role returned both queue state and Gate endpoints"));
         }
         wait_for_queue(&queue, deadline).await?;
     }
@@ -115,12 +93,8 @@ async fn wait_for_queue(queue: &pb::LoginQueue, deadline: Instant) -> Result<()>
     if queue.position <= 0 || queue.next_request_time <= 0 {
         return Err(failure("Auth use-role returned invalid queue state"));
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| failure(format!("read system clock: {error}")))?
-        .as_secs();
-    let next = u64::try_from(queue.next_request_time)
-        .map_err(|_| failure("Auth use-role returned invalid next_request_time"))?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|error| failure(format!("read system clock: {error}")))?.as_secs();
+    let next = u64::try_from(queue.next_request_time).map_err(|_| failure("Auth use-role returned invalid next_request_time"))?;
     let wait = Duration::from_secs(next.saturating_sub(now));
     let remaining = remaining(deadline, "Auth use-role queue")?;
     if wait >= remaining {
@@ -130,24 +104,14 @@ async fn wait_for_queue(queue: &pb::LoginQueue, deadline: Instant) -> Result<()>
     Ok(())
 }
 
-async fn post_json<T, R>(
-    client: &JsonClient,
-    base_url: &str,
-    path: &str,
-    value: &T,
-    deadline: Instant,
-    operation: &str,
-) -> Result<R>
+async fn post_json<T, R>(client: &JsonClient, base_url: &str, path: &str, value: &T, deadline: Instant, operation: &str) -> Result<R>
 where
     T: Serialize,
     R: DeserializeOwned,
 {
     let url = format!("{}{}", base_url.trim_end_matches('/'), path);
-    let uri: Uri = url
-        .parse()
-        .map_err(|error| failure(format!("invalid {operation} URL {url}: {error}")))?;
-    let body = serde_json::to_vec(value)
-        .map_err(|error| failure(format!("encode {operation} request: {error}")))?;
+    let uri: Uri = url.parse().map_err(|error| failure(format!("invalid {operation} URL {url}: {error}")))?;
+    let body = serde_json::to_vec(value).map_err(|error| failure(format!("encode {operation} request: {error}")))?;
     let request = Request::post(uri)
         .header(CONTENT_TYPE, "application/json")
         .body(Full::new(Bytes::from(body)))
@@ -162,27 +126,17 @@ where
         .map_err(|error| failure(format!("read {operation} response: {error}")))?
         .to_bytes();
     if status != StatusCode::OK {
-        return Err(failure(format!(
-            "{operation} returned HTTP {status}: {}",
-            String::from_utf8_lossy(&body)
-        )));
+        return Err(failure(format!("{operation} returned HTTP {status}: {}", String::from_utf8_lossy(&body))));
     }
-    serde_json::from_slice(&body)
-        .map_err(|error| failure(format!("decode {operation} response: {error}")))
+    serde_json::from_slice(&body).map_err(|error| failure(format!("decode {operation} response: {error}")))
 }
 
 fn validate_auth_login(account: &str, response: pb::AuthLoginRsp) -> Result<(i64, String)> {
     require_ok(response.status.as_ref(), "Auth login")?;
     if response.account != account {
-        return Err(failure(format!(
-            "Auth login returned account {}, expected {account}",
-            response.account
-        )));
+        return Err(failure(format!("Auth login returned account {}, expected {account}", response.account)));
     }
-    let role = response
-        .roles
-        .first()
-        .ok_or_else(|| failure("Auth login returned no role"))?;
+    let role = response.roles.first().ok_or_else(|| failure("Auth login returned no role"))?;
     if role.gid <= 0 {
         return Err(failure("Auth login returned invalid gid"));
     }
@@ -195,22 +149,13 @@ fn validate_auth_login(account: &str, response: pb::AuthLoginRsp) -> Result<(i64
 pub(crate) fn require_ok(status: Option<&pb::Status>, operation: &str) -> Result<()> {
     match status {
         Some(status) if status.code == code::OK => Ok(()),
-        Some(status) => Err(failure(format!(
-            "{operation} failed: code={} message={}",
-            status.code, status.message
-        ))),
+        Some(status) => Err(failure(format!("{operation} failed: code={} message={}", status.code, status.message))),
         None => Err(failure(format!("{operation} returned no status"))),
     }
 }
 
-pub(crate) async fn before_deadline<T>(
-    deadline: Instant,
-    operation: &str,
-    future: impl Future<Output = T>,
-) -> Result<T> {
-    timeout(remaining(deadline, operation)?, future)
-        .await
-        .map_err(|_| failure(format!("{operation} timed out")))
+pub(crate) async fn before_deadline<T>(deadline: Instant, operation: &str, future: impl Future<Output = T>) -> Result<T> {
+    timeout(remaining(deadline, operation)?, future).await.map_err(|_| failure(format!("{operation} timed out")))
 }
 
 pub(crate) fn remaining(deadline: Instant, operation: &str) -> Result<Duration> {

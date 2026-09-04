@@ -3,9 +3,7 @@ use std::{env, error::Error, fmt, net::SocketAddr, time::Duration};
 use prost::Message;
 use tokio::{sync::mpsc, time::timeout};
 use xkk_protocol::{MsgId, code, pb};
-use xnet::{
-    Client, ClientConfig, ConnectEndpoint, Connection, Frame, Handler, SessionId, SessionManager,
-};
+use xnet::{Client, ClientConfig, ConnectEndpoint, Connection, Frame, Handler, SessionId, SessionManager};
 use xproto::cs::{CsHead, CsPacket};
 
 const EVENT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -38,9 +36,7 @@ struct EventHandler {
 
 impl EventHandler {
     fn emit(&self, event: Event) {
-        self.events
-            .try_send(event)
-            .expect("cluster smoke event queue exhausted");
+        self.events.try_send(event).expect("cluster smoke event queue exhausted");
     }
 }
 
@@ -67,14 +63,8 @@ async fn main() -> Result<()> {
 fn arguments() -> Result<(SocketAddr, i64, String, String)> {
     let mut args = env::args().skip(1);
     let usage = "usage: xkk-cluster-smoke <gate-addr> <gid> <token> <device-id>";
-    let addr = args
-        .next()
-        .ok_or_else(|| SmokeError(usage.to_string()))?
-        .parse()?;
-    let gid = args
-        .next()
-        .ok_or_else(|| SmokeError(usage.to_string()))?
-        .parse()?;
+    let addr = args.next().ok_or_else(|| SmokeError(usage.to_string()))?.parse()?;
+    let gid = args.next().ok_or_else(|| SmokeError(usage.to_string()))?.parse()?;
     let token = args.next().ok_or_else(|| SmokeError(usage.to_string()))?;
     let device_id = args.next().ok_or_else(|| SmokeError(usage.to_string()))?;
     if args.next().is_some() || gid <= 0 || token.is_empty() || device_id.len() < 8 {
@@ -85,24 +75,10 @@ fn arguments() -> Result<(SocketAddr, i64, String, String)> {
 
 async fn run(addr: SocketAddr, gid: i64, token: String, device_id: String) -> Result<()> {
     let (first_client, first_conn, mut first_events) = connect(addr).await?;
-    send(
-        &first_conn,
-        MsgId::LoginReq,
-        1,
-        0,
-        &pb::LoginReq {
-            gid,
-            token: token.clone(),
-            device_id: device_id.clone(),
-        },
-    )?;
-    let (login_head, login): (_, pb::LoginRsp) =
-        receive(&mut first_events, MsgId::LoginRsp).await?;
+    send(&first_conn, MsgId::LoginReq, 1, 0, &pb::LoginReq { gid, token: token.clone(), device_id: device_id.clone() })?;
+    let (login_head, login): (_, pb::LoginRsp) = receive(&mut first_events, MsgId::LoginRsp).await?;
     require_ok(login.status.as_ref(), "Gate login")?;
-    if login.gid != gid
-        || login.session_id <= 0
-        || login.player.as_ref().map(|p| p.gid) != Some(gid)
-    {
+    if login.gid != gid || login.session_id <= 0 || login.player.as_ref().map(|p| p.gid) != Some(gid) {
         return Err(SmokeError("Gate login returned invalid player state".to_string()).into());
     }
     require_ack(login_head, 1, "Gate login")?;
@@ -115,58 +91,30 @@ async fn run(addr: SocketAddr, gid: i64, token: String, device_id: String) -> Re
         MsgId::ReconnectReq,
         2,
         login_head.seq,
-        &pb::ReconnectReq {
-            gid,
-            token,
-            device_id,
-            previous_session,
-            ack: login_head.seq,
-        },
+        &pb::ReconnectReq { gid, token, device_id, previous_session, ack: login_head.seq },
     )?;
-    let (reconnect_head, reconnect): (_, pb::ReconnectRsp) =
-        receive(&mut second_events, MsgId::ReconnectRsp).await?;
+    let (reconnect_head, reconnect): (_, pb::ReconnectRsp) = receive(&mut second_events, MsgId::ReconnectRsp).await?;
     require_ok(reconnect.status.as_ref(), "Gate reconnect")?;
     require_ack(reconnect_head, 2, "Gate reconnect")?;
     if reconnect.session_id <= 0 || reconnect.session_id == previous_session {
         return Err(SmokeError("Gate reconnect did not publish a new session".to_string()).into());
     }
 
-    send(
-        &second_conn,
-        MsgId::PlayerInfoReq,
-        3,
-        reconnect_head.seq,
-        &pb::PlayerInfoReq {},
-    )?;
-    let (player_head, player): (_, pb::PlayerInfoRsp) =
-        receive(&mut second_events, MsgId::PlayerInfoRsp).await?;
+    send(&second_conn, MsgId::PlayerInfoReq, 3, reconnect_head.seq, &pb::PlayerInfoReq {})?;
+    let (player_head, player): (_, pb::PlayerInfoRsp) = receive(&mut second_events, MsgId::PlayerInfoRsp).await?;
     require_ok(player.status.as_ref(), "Logic player info")?;
     require_ack(player_head, 3, "Logic player info")?;
     if player.player.as_ref().map(|value| value.gid) != Some(gid) {
         return Err(SmokeError("Logic returned the wrong player".to_string()).into());
     }
 
-    send(
-        &second_conn,
-        MsgId::MailListReq,
-        4,
-        player_head.seq,
-        &pb::MailListReq {},
-    )?;
-    let (mail_head, mail): (_, pb::MailListRsp) =
-        receive(&mut second_events, MsgId::MailListRsp).await?;
+    send(&second_conn, MsgId::MailListReq, 4, player_head.seq, &pb::MailListReq {})?;
+    let (mail_head, mail): (_, pb::MailListRsp) = receive(&mut second_events, MsgId::MailListRsp).await?;
     require_ok(mail.status.as_ref(), "Public mail list")?;
     require_ack(mail_head, 4, "Public mail list")?;
 
-    send(
-        &second_conn,
-        MsgId::LogoutReq,
-        5,
-        mail_head.seq,
-        &pb::LogoutReq {},
-    )?;
-    let (logout_head, logout): (_, pb::LogoutRsp) =
-        receive(&mut second_events, MsgId::LogoutRsp).await?;
+    send(&second_conn, MsgId::LogoutReq, 5, mail_head.seq, &pb::LogoutReq {})?;
+    let (logout_head, logout): (_, pb::LogoutRsp) = receive(&mut second_events, MsgId::LogoutRsp).await?;
     require_ok(logout.status.as_ref(), "Gate logout")?;
     require_ack(logout_head, 5, "Gate logout")?;
     second_client.shutdown().await;
@@ -203,17 +151,8 @@ fn send<M>(conn: &Connection, msgid: MsgId, seq: u32, ack: u32, body: &M) -> Res
 where
     M: Message,
 {
-    let payload = CsPacket::encode_message(
-        CsHead {
-            msgid: msgid.as_u16(),
-            seq,
-            ack,
-            ..Default::default()
-        },
-        body,
-    )?;
-    conn.send(payload)
-        .map_err(|error| SmokeError(format!("Gate send rejected for {msgid:?}: {error}")))?;
+    let payload = CsPacket::encode_message(CsHead { msgid: msgid.as_u16(), seq, ack, ..Default::default() }, body)?;
+    conn.send(payload).map_err(|error| SmokeError(format!("Gate send rejected for {msgid:?}: {error}")))?;
     Ok(())
 }
 
@@ -229,26 +168,15 @@ where
     let frame = match event {
         Event::Packet(frame) => frame,
         Event::Disconnected(session_id) => {
-            return Err(SmokeError(format!(
-                "Gate disconnected session {session_id} before {expected:?}"
-            ))
-            .into());
+            return Err(SmokeError(format!("Gate disconnected session {session_id} before {expected:?}")).into());
         }
         Event::Connected(conn) => {
-            return Err(SmokeError(format!(
-                "unexpected Gate connection {} before {expected:?}",
-                conn.session_id()
-            ))
-            .into());
+            return Err(SmokeError(format!("unexpected Gate connection {} before {expected:?}", conn.session_id())).into());
         }
     };
     let packet = CsPacket::decode(&frame.payload)?;
     if packet.head.msgid != expected.as_u16() {
-        return Err(SmokeError(format!(
-            "expected {expected:?}, got message {}",
-            packet.head.msgid
-        ))
-        .into());
+        return Err(SmokeError(format!("expected {expected:?}, got message {}", packet.head.msgid)).into());
     }
     Ok((packet.head, M::decode(packet.body)?))
 }
@@ -256,22 +184,14 @@ where
 fn require_ok(status: Option<&pb::Status>, operation: &str) -> Result<()> {
     match status {
         Some(status) if status.code == code::OK => Ok(()),
-        Some(status) => Err(SmokeError(format!(
-            "{operation} failed: code={} message={}",
-            status.code, status.message
-        ))
-        .into()),
+        Some(status) => Err(SmokeError(format!("{operation} failed: code={} message={}", status.code, status.message)).into()),
         None => Err(SmokeError(format!("{operation} returned no status")).into()),
     }
 }
 
 fn require_ack(head: CsHead, expected: u32, operation: &str) -> Result<()> {
     if head.ack != expected || head.seq == 0 {
-        return Err(SmokeError(format!(
-            "{operation} returned invalid sequence: seq={} ack={}",
-            head.seq, head.ack
-        ))
-        .into());
+        return Err(SmokeError(format!("{operation} returned invalid sequence: seq={} ack={}", head.seq, head.ack)).into());
     }
     Ok(())
 }

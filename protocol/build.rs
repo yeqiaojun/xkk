@@ -6,13 +6,7 @@ use std::{
 use prost::Message;
 use prost_types::{FileDescriptorSet, compiler::CodeGeneratorRequest};
 
-const GENERATED_FILES: [&str; 5] = [
-    "xkk.v1.rs",
-    "xkk.xmongo.rs",
-    "model.xmongo.rs",
-    "xkk.registry.rs",
-    "xkk.descriptor.bin",
-];
+const GENERATED_FILES: [&str; 5] = ["xkk.v1.rs", "xkk.xmongo.rs", "model.xmongo.rs", "xkk.registry.rs", "xkk.descriptor.bin"];
 
 fn main() {
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
@@ -22,11 +16,7 @@ fn main() {
     let protoc = protoc_bin_vendored::protoc_bin_path().expect("locate vendored protobuf compiler");
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
 
-    assert!(
-        protoc.is_file(),
-        "missing protocol compiler: {}",
-        protoc.display()
-    );
+    assert!(protoc.is_file(), "missing protocol compiler: {}", protoc.display());
 
     println!("cargo:rerun-if-changed={}", protocol_proto.display());
     println!("cargo:rerun-if-changed={}", model_proto.display());
@@ -34,20 +24,14 @@ fn main() {
 
     let checked_in_dir = manifest.join("generated");
     for file in GENERATED_FILES {
-        println!(
-            "cargo:rerun-if-changed={}",
-            checked_in_dir.join(file).display()
-        );
+        println!("cargo:rerun-if-changed={}", checked_in_dir.join(file).display());
     }
 
     unsafe { std::env::set_var("PROTOC", &protoc) };
 
     let descriptor_path = out_dir.join("xkk.descriptor.bin");
     prost_build::Config::new()
-        .message_attribute(
-            ".",
-            "#[derive(serde::Serialize, serde::Deserialize)] #[serde(default)]",
-        )
+        .message_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)] #[serde(default)]")
         .enum_attribute(".", "#[derive(serde::Serialize, serde::Deserialize)]")
         .file_descriptor_set_path(&descriptor_path)
         .compile_protos(&[protocol_proto, model_proto], &[proto_dir])
@@ -93,8 +77,7 @@ fn generate_registry(descriptor_path: &Path, output_path: &Path) {
 
 fn generate_xmongo_traits(descriptor_path: &Path, out_dir: &Path) {
     let descriptor = fs::read(descriptor_path).expect("read xkk descriptor set");
-    let descriptor =
-        FileDescriptorSet::decode(descriptor.as_slice()).expect("decode xkk descriptor set");
+    let descriptor = FileDescriptorSet::decode(descriptor.as_slice()).expect("decode xkk descriptor set");
     let response = protoc_gen_xmongo_trait::generate(CodeGeneratorRequest {
         file_to_generate: vec!["xkk.proto".to_string(), "model.proto".to_string()],
         proto_file: descriptor.file,
@@ -123,23 +106,16 @@ fn sync_checked_in_generated(out_dir: &Path, checked_in_dir: &Path) {
 
         if update {
             if fs::read(&checked_in_path).ok().as_deref() != Some(generated.as_slice()) {
-                fs::write(&checked_in_path, generated)
-                    .expect("update checked-in protocol artifact");
+                fs::write(&checked_in_path, generated).expect("update checked-in protocol artifact");
             }
             continue;
         }
 
         let checked_in = fs::read(&checked_in_path).unwrap_or_else(|_| {
-            panic!(
-                "missing checked-in protocol artifact {}; run bash scripts/gen-proto.sh",
-                checked_in_path.display()
-            )
+            panic!("missing checked-in protocol artifact {}; run bash scripts/gen-proto.sh", checked_in_path.display())
         });
         if file.ends_with(".bin") {
-            assert_eq!(
-                checked_in, generated,
-                "checked-in protocol artifact {checked_in_path:?} is stale"
-            );
+            assert_eq!(checked_in, generated, "checked-in protocol artifact {checked_in_path:?} is stale");
         } else {
             assert!(
                 same_text(&checked_in, &generated),
@@ -151,6 +127,5 @@ fn sync_checked_in_generated(out_dir: &Path, checked_in_dir: &Path) {
 }
 
 fn same_text(left: &[u8], right: &[u8]) -> bool {
-    String::from_utf8_lossy(left).replace("\r\n", "\n")
-        == String::from_utf8_lossy(right).replace("\r\n", "\n")
+    String::from_utf8_lossy(left).replace("\r\n", "\n") == String::from_utf8_lossy(right).replace("\r\n", "\n")
 }

@@ -21,17 +21,13 @@ const RPC_CALL_TIMEOUT: Duration = Duration::from_secs(3);
 #[derive(Clone)]
 pub(crate) struct MailService {
     frame: FrameHandle,
-    redis: xframe::xredis::Client,
+    redis: xredis::Client,
     players: PublicPlayers,
 }
 
 impl MailService {
-    pub fn new(frame: FrameHandle, redis: xframe::xredis::Client, players: PublicPlayers) -> Self {
-        Self {
-            frame,
-            redis,
-            players,
-        }
+    pub fn new(frame: FrameHandle, redis: xredis::Client, players: PublicPlayers) -> Self {
+        Self { frame, redis, players }
     }
 
     pub fn register_handlers(&self, rpc: &RpcManager) -> xframe::xrpc::Result<()> {
@@ -75,21 +71,14 @@ impl MailService {
             .players
             .read(gid, |data| {
                 let now = unix_seconds();
-                let mut mails = mail(data)
-                    .mails
-                    .iter()
-                    .filter(|mail| mail.end_time == 0 || mail.end_time > now)
-                    .cloned()
-                    .collect::<Vec<_>>();
+                let mut mails =
+                    mail(data).mails.iter().filter(|mail| mail.end_time == 0 || mail.end_time > now).cloned().collect::<Vec<_>>();
                 mails.sort_unstable_by_key(|mail| mail.mail_id);
                 mails
             })
             .await;
         match result {
-            Ok(mails) => pb::MailListRsp {
-                status: Some(ok_status()),
-                mails,
-            },
+            Ok(mails) => pb::MailListRsp { status: Some(ok_status()), mails },
             Err(error) => mail_list_status(cache_status(gid, "list", error)),
         }
     }
@@ -117,10 +106,7 @@ impl MailService {
             })
             .await;
         match result {
-            Ok(mail_ids) => pb::MailReadRsp {
-                status: Some(ok_status()),
-                mail_ids,
-            },
+            Ok(mail_ids) => pb::MailReadRsp { status: Some(ok_status()), mail_ids },
             Err(error) => mail_read_status(cache_status(gid, "read", error)),
         }
     }
@@ -150,10 +136,7 @@ impl MailService {
             })
             .await;
         match result {
-            Ok(mail_ids) => pb::MailDeleteRsp {
-                status: Some(ok_status()),
-                mail_ids,
-            },
+            Ok(mail_ids) => pb::MailDeleteRsp { status: Some(ok_status()), mail_ids },
             Err(error) => mail_delete_status(cache_status(gid, "delete", error)),
         }
     }
@@ -165,30 +148,20 @@ impl MailService {
         let Some(mail_ids) = valid_mail_ids(request.mail_ids) else {
             return mail_claim_error(code::INVALID_ARGUMENT, "invalid mail ids");
         };
-        let result = self
-            .players
-            .update(gid, |data| claim_mails(mail_mut(data), &mail_ids))
-            .await;
+        let result = self.players.update(gid, |data| claim_mails(mail_mut(data), &mail_ids)).await;
         let attachments = match result {
             Ok(Ok(attachments)) => attachments,
             Ok(Err(status)) => return mail_claim_status(status),
             Err(error) => return mail_claim_status(cache_status(gid, "claim", error)),
         };
         if attachments.is_empty() {
-            return pb::MailClaimRsp {
-                status: Some(ok_status()),
-                mail_ids,
-                items: Vec::new(),
-            };
+            return pb::MailClaimRsp { status: Some(ok_status()), mail_ids, items: Vec::new() };
         }
 
         let online = match load_online(&self.redis, gid).await {
             Ok(Some(online)) if online.logic_id > 0 => online,
             Ok(_) => {
-                return mail_claim_error(
-                    code::TEMPORARILY_UNAVAILABLE,
-                    "Logic ownership unavailable",
-                );
+                return mail_claim_error(code::TEMPORARILY_UNAVAILABLE, "Logic ownership unavailable");
             }
             Err(error) => {
                 tracing::error!(gid, %error, "Public claim online state load failed");
@@ -202,11 +175,7 @@ impl MailService {
                 online.logic_id,
                 context.head.gid,
                 context.head.player_session,
-                &pb::AddItemsReq {
-                    gid,
-                    items: attachments,
-                    reason: format!("mail_claim:{mail_ids:?}"),
-                },
+                &pb::AddItemsReq { gid, items: attachments, reason: format!("mail_claim:{mail_ids:?}") },
                 RPC_CALL_TIMEOUT,
             )
             .await
@@ -217,23 +186,12 @@ impl MailService {
                 return mail_claim_error(code::TEMPORARILY_UNAVAILABLE, "item grant failed");
             }
         };
-        let status = response
-            .status
-            .unwrap_or_else(|| error_status(code::INTERNAL, "Logic item response has no status"));
+        let status = response.status.unwrap_or_else(|| error_status(code::INTERNAL, "Logic item response has no status"));
         if status.code != code::OK {
-            tracing::error!(
-                gid,
-                ?mail_ids,
-                status = status.code,
-                "Public claimed mail item grant rejected"
-            );
+            tracing::error!(gid, ?mail_ids, status = status.code, "Public claimed mail item grant rejected");
             return mail_claim_status(status);
         }
-        pb::MailClaimRsp {
-            status: Some(ok_status()),
-            mail_ids,
-            items: response.items,
-        }
+        pb::MailClaimRsp { status: Some(ok_status()), mail_ids, items: response.items }
     }
 
     async fn send_mail(&self, request: pb::SendMailReq) -> pb::SendMailRsp {
@@ -244,10 +202,7 @@ impl MailService {
             || message.title.is_empty()
             || message.title.len() > 128
             || message.content.len() > 4096
-            || message
-                .attachments
-                .iter()
-                .any(|item| item.item_id <= 0 || item.count <= 0)
+            || message.attachments.iter().any(|item| item.item_id <= 0 || item.count <= 0)
         {
             return send_mail_error(code::INVALID_ARGUMENT, "invalid mail request");
         }
@@ -259,24 +214,10 @@ impl MailService {
                 let data = mail_mut(data);
                 let mail_id = new_mail_id();
                 message.mail_id = mail_id;
-                message.send_time = if message.send_time == 0 {
-                    now
-                } else {
-                    message.send_time
-                };
-                message.end_time = if message.end_time == 0 {
-                    message.send_time + DEFAULT_MAIL_LIFETIME
-                } else {
-                    message.end_time
-                };
+                message.send_time = if message.send_time == 0 { now } else { message.send_time };
+                message.end_time = if message.end_time == 0 { message.send_time + DEFAULT_MAIL_LIFETIME } else { message.end_time };
                 if message.end_time <= now {
-                    return (
-                        Err(error_status(
-                            code::INVALID_ARGUMENT,
-                            "mail is already expired",
-                        )),
-                        false,
-                    );
+                    return (Err(error_status(code::INVALID_ARGUMENT, "mail is already expired")), false);
                 }
 
                 message.state = 0;
@@ -284,12 +225,7 @@ impl MailService {
                 data.mails.sort_unstable_by_key(|mail| mail.mail_id);
                 if data.mails.len() > MAX_MAILS_PER_PLAYER {
                     let remove = data.mails.len() - MAX_MAILS_PER_PLAYER;
-                    tracing::error!(
-                        gid,
-                        retained = MAX_MAILS_PER_PLAYER,
-                        removed = remove,
-                        "Public mail retention hard limit exceeded"
-                    );
+                    tracing::error!(gid, retained = MAX_MAILS_PER_PLAYER, removed = remove, "Public mail retention hard limit exceeded");
                     data.mails.drain(..remove);
                 }
                 (Ok(message.clone()), true)
@@ -301,10 +237,7 @@ impl MailService {
             Err(error) => return send_mail_status(cache_status(gid, "send", error)),
         };
         self.notify_mail(gid, message.clone()).await;
-        pb::SendMailRsp {
-            status: Some(ok_status()),
-            mail_id: message.mail_id,
-        }
+        pb::SendMailRsp { status: Some(ok_status()), mail_id: message.mail_id }
     }
 
     async fn notify_mail(&self, gid: i64, mail: pb::Mail) {
@@ -314,27 +247,15 @@ impl MailService {
         if online.gate_id <= 0 || online.session <= 0 {
             return;
         }
-        if let Err(error) = self
-            .frame
-            .send_to(
-                xkk_common::service_type::GATE,
-                online.gate_id,
-                &pb::MailPushNtf {
-                    gid,
-                    mail: Some(mail),
-                },
-            )
-            .await
+        if let Err(error) =
+            self.frame.send_to(xkk_common::service_type::GATE, online.gate_id, &pb::MailPushNtf { gid, mail: Some(mail) }).await
         {
             tracing::debug!(gid, gate_id = online.gate_id, %error, "Public mail push failed");
         }
     }
 }
 
-fn claim_mails(
-    data: &mut pb::MailData,
-    mail_ids: &[i64],
-) -> (Result<Vec<pb::Item>, pb::Status>, bool) {
+fn claim_mails(data: &mut pb::MailData, mail_ids: &[i64]) -> (Result<Vec<pb::Item>, pb::Status>, bool) {
     let now = unix_seconds();
     let mut attachments = Vec::new();
     for mail_id in mail_ids {
@@ -342,10 +263,7 @@ fn claim_mails(
             return (Err(error_status(code::NOT_FOUND, "mail not found")), false);
         };
         if (mail.end_time != 0 && mail.end_time <= now) || mail.state >= MAIL_CLAIMED {
-            return (
-                Err(error_status(code::CONFLICT, "mail cannot be claimed")),
-                false,
-            );
+            return (Err(error_status(code::CONFLICT, "mail cannot be claimed")), false);
         }
         attachments.extend(mail.attachments.clone());
     }
@@ -358,15 +276,11 @@ fn claim_mails(
 }
 
 fn mail(data: &pb::PublicPlayerData) -> &pb::MailData {
-    data.mail
-        .as_ref()
-        .expect("persist normalizes Public player Mail data")
+    data.mail.as_ref().expect("persist normalizes Public player Mail data")
 }
 
 fn mail_mut(data: &mut pb::PublicPlayerData) -> &mut pb::MailData {
-    data.mail
-        .as_mut()
-        .expect("persist normalizes Public player Mail data")
+    data.mail.as_mut().expect("persist normalizes Public player Mail data")
 }
 
 fn cache_status(gid: i64, operation: &'static str, error: PublicPlayerCacheError) -> pb::Status {
@@ -385,10 +299,7 @@ fn valid_mail_ids(mail_ids: Vec<i64>) -> Option<Vec<i64>> {
         return None;
     }
     let mut seen = HashSet::with_capacity(mail_ids.len());
-    mail_ids
-        .iter()
-        .all(|mail_id| *mail_id > 0 && seen.insert(*mail_id))
-        .then_some(mail_ids)
+    mail_ids.iter().all(|mail_id| *mail_id > 0 && seen.insert(*mail_id)).then_some(mail_ids)
 }
 
 fn new_mail_id() -> i64 {
@@ -441,20 +352,8 @@ mod tests {
     fn claim_validates_every_mail_before_mutating() {
         let mut data = pb::MailData {
             mails: vec![
-                pb::Mail {
-                    mail_id: 1,
-                    attachments: vec![pb::Item {
-                        item_id: 7,
-                        count: 2,
-                        change: 0,
-                    }],
-                    ..Default::default()
-                },
-                pb::Mail {
-                    mail_id: 2,
-                    state: MAIL_CLAIMED,
-                    ..Default::default()
-                },
+                pb::Mail { mail_id: 1, attachments: vec![pb::Item { item_id: 7, count: 2, change: 0 }], ..Default::default() },
+                pb::Mail { mail_id: 2, state: MAIL_CLAIMED, ..Default::default() },
             ],
         };
 

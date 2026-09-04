@@ -51,29 +51,16 @@ impl GateListeners {
 
     fn validate(&self) -> Result<()> {
         if self.primary_port().is_none() {
-            return Err(invalid(
-                SERVICE,
-                "listeners.primary_transport must be enabled",
-            ));
+            return Err(invalid(SERVICE, "listeners.primary_transport must be enabled"));
         }
-        if [self.tcp_port, self.kcp_port, self.websocket_port]
-            .into_iter()
-            .flatten()
-            .any(|port| port == 0)
-        {
+        if [self.tcp_port, self.kcp_port, self.websocket_port].into_iter().flatten().any(|port| port == 0) {
             return Err(invalid(SERVICE, "listener ports must be positive"));
         }
         if self.tcp_port.is_some() && self.tcp_port == self.websocket_port {
-            return Err(invalid(
-                SERVICE,
-                "TCP and WebSocket cannot share one TCP port",
-            ));
+            return Err(invalid(SERVICE, "TCP and WebSocket cannot share one TCP port"));
         }
         if !self.websocket_path.starts_with('/') {
-            return Err(invalid(
-                SERVICE,
-                "listeners.websocket_path must start with '/'",
-            ));
+            return Err(invalid(SERVICE, "listeners.websocket_path must start with '/'"));
         }
         Ok(())
     }
@@ -108,11 +95,7 @@ impl GateConfig {
         Self::compose(common, role, version)
     }
 
-    fn compose(
-        common: CommonConfig,
-        role: GateRoleConfig,
-        version: ServiceVersion,
-    ) -> Result<Self> {
+    fn compose(common: CommonConfig, role: GateRoleConfig, version: ServiceVersion) -> Result<Self> {
         common.validate(SERVICE)?;
         let config = Self {
             node: role.node.compose(common.cluster.clone()),

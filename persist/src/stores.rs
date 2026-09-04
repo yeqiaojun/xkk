@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use xframe::xmongo::{
+use xkk_protocol::pb;
+use xmongo::{
     self, BsonPathGetter, Collection,
     mongodb::bson::{Bson, Document, doc},
 };
-use xkk_protocol::pb;
 
 use crate::model::{load_model, save_model, save_models};
 
@@ -60,11 +60,7 @@ impl PlayerStore {
             return Ok(Vec::new());
         }
         let ids = Bson::Array(gids.iter().copied().map(Bson::Int64).collect());
-        let mut cursor = self
-            .collection
-            .find(doc! { "_id": { "$in": ids } })
-            .await
-            .map_err(xmongo::Error::from)?;
+        let mut cursor = self.collection.find(doc! { "_id": { "$in": ids } }).await.map_err(xmongo::Error::from)?;
         let mut loaded = HashMap::with_capacity(gids.len());
         while cursor.advance().await.map_err(xmongo::Error::from)? {
             let document = cursor.deserialize_current().map_err(xmongo::Error::from)?;
@@ -95,10 +91,7 @@ impl PublicPlayerStore {
         Ok(save_model(&self.collection, player).await?)
     }
 
-    pub async fn save_batch(
-        &self,
-        players: impl IntoIterator<Item = pb::PublicPlayerData>,
-    ) -> Result<usize> {
+    pub async fn save_batch(&self, players: impl IntoIterator<Item = pb::PublicPlayerData>) -> Result<usize> {
         Ok(save_models(&self.collection, players).await?)
     }
 }

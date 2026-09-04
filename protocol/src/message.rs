@@ -41,34 +41,19 @@ pub fn is_outbox_message(msgid: u16) -> bool {
     if (1..xproto::SYSTEM_MSG_ID_END as u16).contains(&msgid) {
         return false;
     }
-    !matches!(
-        from_u16(msgid),
-        Some(
-            MsgId::PingRsp
-                | MsgId::LoginRsp
-                | MsgId::ReconnectRsp
-                | MsgId::LogoutRsp
-                | MsgId::KickNtf
-        )
-    )
+    !matches!(from_u16(msgid), Some(MsgId::PingRsp | MsgId::LoginRsp | MsgId::ReconnectRsp | MsgId::LogoutRsp | MsgId::KickNtf))
 }
 
 pub fn response_for(request: MsgId) -> Option<MsgId> {
-    let response = xproto::global_registry()
-        .ok()?
-        .response_id(request.as_u16())?;
+    let response = xproto::global_registry().ok()?.response_id(request.as_u16())?;
     from_u16(response)
 }
 
 pub fn route_target(request: MsgId) -> Option<RouteTarget> {
     Some(match request {
-        MsgId::PingReq | MsgId::LoginReq | MsgId::ReconnectReq | MsgId::LogoutReq => {
-            RouteTarget::Gate
-        }
+        MsgId::PingReq | MsgId::LoginReq | MsgId::ReconnectReq | MsgId::LogoutReq => RouteTarget::Gate,
         MsgId::PlayerInfoReq | MsgId::UseItemReq => RouteTarget::Logic,
-        MsgId::MailListReq | MsgId::MailReadReq | MsgId::MailDeleteReq | MsgId::MailClaimReq => {
-            RouteTarget::Public
-        }
+        MsgId::MailListReq | MsgId::MailReadReq | MsgId::MailDeleteReq | MsgId::MailClaimReq => RouteTarget::Public,
         _ => return None,
     })
 }

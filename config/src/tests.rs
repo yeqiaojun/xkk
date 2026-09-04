@@ -37,10 +37,7 @@ log:
     assert_eq!(config.version.conf, 7);
     assert_eq!(config.log.level, LogLevel::Debug);
     assert_eq!(config.log.rotation, LogRotation::Hourly);
-    assert_eq!(
-        config.log.options("unused.log").rotation,
-        xlog::Rotation::Hourly
-    );
+    assert_eq!(config.log.options("unused.log").rotation, xlog::Rotation::Hourly);
 }
 
 #[test]
@@ -70,28 +67,17 @@ fn explicit_role_file_loads_common_and_version_from_its_directory() {
 #[test]
 fn invalid_version_document_fails_fast() {
     assert!(matches!(
-        AuthConfig::parse(
-            include_str!("../common.yaml"),
-            include_str!("../auth.yaml"),
-            r#"{"conf_version":-1}"#,
-        ),
+        AuthConfig::parse(include_str!("../common.yaml"), include_str!("../auth.yaml"), r#"{"conf_version":-1}"#,),
         Err(ConfigError::Invalid { .. })
     ));
 }
 
 #[test]
 fn retired_storage_section_fails_fast() {
-    let role = format!(
-        "{}\nstorage:\n  mongo_database: xkk\n  account_collection: accounts\n",
-        include_str!("../auth.yaml")
-    );
+    let role = format!("{}\nstorage:\n  mongo_database: xkk\n  account_collection: accounts\n", include_str!("../auth.yaml"));
 
     assert!(matches!(
-        AuthConfig::parse(
-            include_str!("../common.yaml"),
-            &role,
-            include_str!("../version.json"),
-        ),
+        AuthConfig::parse(include_str!("../common.yaml"), &role, include_str!("../version.json"),),
         Err(ConfigError::Decode { .. })
     ));
 }
@@ -117,11 +103,7 @@ fn retired_runtime_and_capacity_sections_fail_fast() {
     ] {
         let role = format!("{}\n{retired}", include_str!("../auth.yaml"));
         assert!(matches!(
-            AuthConfig::parse(
-                include_str!("../common.yaml"),
-                &role,
-                include_str!("../version.json"),
-            ),
+            AuthConfig::parse(include_str!("../common.yaml"), &role, include_str!("../version.json"),),
             Err(ConfigError::Decode { .. })
         ));
     }
@@ -129,14 +111,9 @@ fn retired_runtime_and_capacity_sections_fail_fast() {
 
 #[test]
 fn unknown_nested_fields_fail_fast() {
-    let yaml = include_str!("../query.yaml")
-        .replace("  http_port: 3401", "  http_port: 3401\n  hidden_budget: 1");
+    let yaml = include_str!("../query.yaml").replace("  http_port: 3401", "  http_port: 3401\n  hidden_budget: 1");
     assert!(matches!(
-        QueryConfig::parse(
-            include_str!("../common.yaml"),
-            &yaml,
-            include_str!("../version.json")
-        ),
+        QueryConfig::parse(include_str!("../common.yaml"), &yaml, include_str!("../version.json")),
         Err(ConfigError::Decode { .. })
     ));
 }

@@ -2,10 +2,7 @@ use std::{collections::HashMap, io, path::PathBuf, time::Duration};
 
 use thiserror::Error;
 use tokio::task::JoinHandle;
-use xframe::{
-    Application, ApplicationResult, DiscoveryConfig, FrameConfig, FrameHandle, NodeConfig,
-    RpcConfig,
-};
+use xframe::{Application, ApplicationResult, DiscoveryConfig, FrameHandle, NodeConfig, RpcConfig, ServiceConfig};
 use xkk_persist::PublicPlayers;
 
 use crate::mail::MailService;
@@ -29,18 +26,18 @@ pub enum ServiceError {
     #[error("close Public log worker: {0}")]
     LogClose(#[source] io::Error),
     #[error(transparent)]
-    Mongo(#[from] xframe::xmongo::Error),
+    Mongo(#[from] xmongo::Error),
     #[error(transparent)]
     Persist(#[from] xkk_persist::Error),
     #[error(transparent)]
-    Redis(#[from] xframe::xredis::Error),
+    Redis(#[from] xredis::Error),
     #[error(transparent)]
     Rpc(#[from] xframe::xrpc::Error),
     #[error(transparent)]
     Protocol(#[from] xkk_protocol::ProtocolError),
 }
 
-fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
+fn service_config(config: &Config) -> Result<ServiceConfig, ServiceError> {
     let metadata = HashMap::from([("protocol".to_string(), "ss".to_string())]);
     let node = NodeConfig::new(
         &config.node.cluster,
@@ -52,19 +49,14 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
     .with_versions(config.version.program, config.version.conf)
     .with_meta_data(metadata);
     let discovery = DiscoveryConfig::new(&config.infrastructure.etcd_dsn)?;
-    let listener = xframe::xnet::ServerConfig::with_listener(xframe::xnet::ListenEndpoint::tcp(
-        format!("{}:{}", config.node.listen_host, config.node.service_port),
-    ));
+    let listener = xframe::xnet::ServerConfig::with_listener(xframe::xnet::ListenEndpoint::tcp(format!(
+        "{}:{}",
+        config.node.listen_host, config.node.service_port
+    )));
 
-    Ok(FrameConfig::new(node)
+    Ok(ServiceConfig::new(node)
         .with_discovery(discovery)
         .with_service_server(listener)
-        .with_mongo(xframe::xmongo::Config::new(
-            &config.infrastructure.mongo_dsn,
-        )?)
-        .with_redis(xframe::xredis::RedisConfig::new(
-            &config.infrastructure.redis_dsn,
-        )?)
         .with_rpc(RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)))
 }
 
@@ -75,36 +67,39 @@ pub fn config_path() -> Result<PathBuf, ServiceError> {
 pub async fn run(config: Config) -> Result<(), ServiceError> {
     config.validate()?;
     let log_options = config.log.options("logs/public.log");
-    let frame_config = frame_config(&config)?;
+    let service_config = service_config(&config)?;
     let instance_id = config.node.instance_id;
     let log_guard = xlog::init_global(log_options)?;
 
     let service: Result<(), ServiceError> = async {
+        xkk_common::service_type::init();
         xkk_protocol::init_global_registry()?;
-        let prepared = xframe::prepare(frame_config).await?;
-        let handle = prepared.handle();
-        let mongo = handle
-            .mongo()
-            .expect("Public FrameConfig always enables Mongo");
-        let redis = handle
-            .redis()
-            .expect("Public FrameConfig always enables Redis");
-        let database = xkk_persist::Database::new(mongo)?;
-        let players = PublicPlayers::new(database.public_players());
-        let mail = MailService::new(handle, redis, players.clone());
-        mail.register_handlers(prepared.rpc())?;
-        let frame = prepared
-            .start(PublicApplication::new(players, METRICS_REPORT_INTERVAL))
-            .await?;
-        tracing::info!(instance_id, "Public service started");
-        let shutdown = frame.run_until_shutdown_signal().await;
-        tracing::info!(
-            instance_id,
-            success = shutdown.is_ok(),
-            "Public service stopped"
-        );
-        shutdown?;
-        Ok(())
+        let redis = xredis::Client::connect_config(xredis::RedisConfig::new(&config.infrastructure.redis_dsn)?).await?;
+        let mongo = match xmongo::Client::connect_config(xmongo::Config::new(&config.infrastructure.mongo_dsn)?).await {
+            Ok(mongo) => mongo,
+            Err(error) => {
+                redis.close();
+                return Err(error.into());
+            }
+        };
+        let result: Result<(), ServiceError> = async {
+            let prepared = xframe::prepare(service_config).await?;
+            let handle = prepared.handle();
+            let database = xkk_persist::Database::new(mongo.clone())?;
+            let players = PublicPlayers::new(database.public_players());
+            let mail = MailService::new(handle, redis.clone(), players.clone());
+            mail.register_handlers(prepared.rpc())?;
+            let frame = prepared.start(PublicApplication::new(players, METRICS_REPORT_INTERVAL)).await?;
+            tracing::info!(instance_id, "Public service started");
+            let shutdown = frame.run_until_shutdown_signal().await;
+            tracing::info!(instance_id, success = shutdown.is_ok(), "Public service stopped");
+            shutdown?;
+            Ok(())
+        }
+        .await;
+        mongo.shutdown().await;
+        redis.close();
+        result
     }
     .await;
     let log_close = log_guard.close().await;
@@ -122,12 +117,7 @@ struct PublicApplication {
 
 impl PublicApplication {
     fn new(players: PublicPlayers, metrics_interval: Duration) -> Self {
-        Self {
-            players,
-            metrics_interval,
-            save_task: None,
-            metrics_task: None,
-        }
+        Self { players, metrics_interval, save_task: None, metrics_task: None }
     }
 }
 
@@ -135,10 +125,7 @@ impl Application for PublicApplication {
     async fn start(&mut self, frame: FrameHandle) -> ApplicationResult {
         frame.watch(xkk_common::service_type::GATE).await?;
         frame.watch(xkk_common::service_type::LOGIC).await?;
-        self.save_task = Some(spawn_player_save(
-            self.players.clone(),
-            PLAYER_SAVE_INTERVAL,
-        ));
+        self.save_task = Some(spawn_player_save(self.players.clone(), PLAYER_SAVE_INTERVAL));
         self.metrics_task = spawn_metrics(frame, self.players.clone(), self.metrics_interval);
         Ok(())
     }
@@ -183,11 +170,7 @@ async fn stop_task(task: &mut Option<JoinHandle<()>>, name: &'static str) {
     }
 }
 
-fn spawn_metrics(
-    frame: FrameHandle,
-    players: PublicPlayers,
-    interval: Duration,
-) -> Option<JoinHandle<()>> {
+fn spawn_metrics(frame: FrameHandle, players: PublicPlayers, interval: Duration) -> Option<JoinHandle<()>> {
     if interval.is_zero() {
         return None;
     }
@@ -201,12 +184,8 @@ fn spawn_metrics(
             ticker.tick().await;
             let stats = frame.stats();
             let player_stats = players.stats();
-            let write_queue_rejected = stats.sessions.outbound_rejected_full
-                + stats
-                    .listeners
-                    .iter()
-                    .map(|listener| listener.outbound_rejected_full)
-                    .sum::<u64>();
+            let write_queue_rejected =
+                stats.sessions.outbound_rejected_full + stats.listeners.iter().map(|listener| listener.outbound_rejected_full).sum::<u64>();
             if stats.rpc.pending_rejected > last_rpc_pending_rejected {
                 tracing::error!(
                     rejected = stats.rpc.pending_rejected - last_rpc_pending_rejected,
@@ -273,21 +252,12 @@ mod tests {
             include_str!("../../../config/version.json"),
         )
         .unwrap();
-        let frame = frame_config(&config).unwrap();
+        let frame = service_config(&config).unwrap();
 
         let server = frame.service_server.as_ref().unwrap();
         assert_eq!(server.transport.write_queue_capacity, 0);
-        assert!(
-            server
-                .listeners
-                .iter()
-                .all(|listener| !listener.is_external())
-        );
-        assert!(frame.http.is_none());
-        assert_eq!(
-            frame.rpc,
-            RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)
-        );
+        assert!(server.listeners.iter().all(|listener| !listener.is_external()));
+        assert_eq!(frame.rpc, RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY));
         assert_eq!(frame.node.meta_data().get("protocol").unwrap(), "ss");
     }
 }

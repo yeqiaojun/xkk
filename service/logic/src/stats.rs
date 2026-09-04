@@ -72,10 +72,7 @@ impl StatsInner {
     }
 
     pub(crate) fn mark_dirty(&self, player_id: u64, dirty: bool) {
-        let mut players = self
-            .dirty_since
-            .lock()
-            .expect("logic dirty registry mutex poisoned");
+        let mut players = self.dirty_since.lock().expect("logic dirty registry mutex poisoned");
         if dirty {
             if let Entry::Vacant(entry) = players.entry(player_id) {
                 entry.insert(Instant::now());
@@ -87,10 +84,7 @@ impl StatsInner {
     }
 
     pub(crate) fn oldest_dirty_age(&self) -> Duration {
-        let players = self
-            .dirty_since
-            .lock()
-            .expect("logic dirty registry mutex poisoned");
+        let players = self.dirty_since.lock().expect("logic dirty registry mutex poisoned");
         let Some(oldest) = players.values().min() else {
             return Duration::ZERO;
         };

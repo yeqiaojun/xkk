@@ -13,10 +13,7 @@ use xmongo::mongodb::{
 };
 use xmongo::{BsonPathGetter, BsonPathValue, Client, DataPersister};
 
-use crate::{
-    LogicCallError, LogicConfig, LogicRuntime, LogicState, Persistence, RejectReason, RuntimeState,
-    ShutdownError,
-};
+use crate::{LogicCallError, LogicConfig, LogicRuntime, LogicState, Persistence, RejectReason, RuntimeState, ShutdownError};
 
 #[derive(Debug)]
 struct TestError(&'static str);
@@ -65,10 +62,7 @@ struct MongoPlayerData {
 
 impl BsonPathGetter for MongoPlayerData {
     fn bson_value(&self) -> xmongo::Result<Bson> {
-        Ok(Bson::Document(Document::from_iter([(
-            "value".to_string(),
-            Bson::Int64(self.value),
-        )])))
+        Ok(Bson::Document(Document::from_iter([("value".to_string(), Bson::Int64(self.value))])))
     }
 
     fn bson_path_value(&self, path: &str) -> xmongo::Result<BsonPathValue> {
@@ -103,10 +97,7 @@ fn test_config() -> LogicConfig {
     }
 }
 
-fn memory_persistence(
-    stored: Arc<Mutex<HashMap<i64, i64>>>,
-    loads: Arc<Mutex<HashMap<i64, usize>>>,
-) -> Persistence<Player, TestError> {
+fn memory_persistence(stored: Arc<Mutex<HashMap<i64, i64>>>, loads: Arc<Mutex<HashMap<i64, usize>>>) -> Persistence<Player, TestError> {
     let load_store = stored.clone();
     Persistence::new(
         move |gid| {
@@ -117,11 +108,7 @@ fn memory_persistence(
                 let generation = loads.entry(gid).or_default();
                 *generation += 1;
                 let value = stored.lock().unwrap().get(&gid).copied().unwrap_or(0);
-                Ok(Player {
-                    value,
-                    generation: *generation,
-                    dirty: false,
-                })
+                Ok(Player { value, generation: *generation, dirty: false })
             }
         },
         move |player| {
@@ -150,10 +137,7 @@ async fn wait_until(mut ready: impl FnMut() -> bool) {
 async fn same_gid_is_strictly_serial() {
     let stored = Arc::new(Mutex::new(HashMap::new()));
     let loads = Arc::new(Mutex::new(HashMap::new()));
-    let runtime = LogicRuntime::new(
-        test_config(),
-        memory_persistence(stored.clone(), loads.clone()),
-    );
+    let runtime = LogicRuntime::new(test_config(), memory_persistence(stored.clone(), loads.clone()));
 
     let mut calls = Vec::new();
     for _ in 0..32 {
@@ -191,13 +175,8 @@ async fn same_gid_is_strictly_serial() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unrelated_gids_run_in_parallel() {
     let barrier = Arc::new(Barrier::new(2));
-    let runtime = LogicRuntime::new(
-        test_config(),
-        memory_persistence(
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(Mutex::new(HashMap::new())),
-        ),
-    );
+    let runtime =
+        LogicRuntime::new(test_config(), memory_persistence(Arc::new(Mutex::new(HashMap::new())), Arc::new(Mutex::new(HashMap::new()))));
 
     let first_barrier = barrier.clone();
     let first = runtime
@@ -214,11 +193,8 @@ async fn unrelated_gids_run_in_parallel() {
         })
         .unwrap();
 
-    let (first, second) = timeout(Duration::from_secs(2), async {
-        tokio::join!(first, second)
-    })
-    .await
-    .expect("different gids were head-of-line blocked");
+    let (first, second) =
+        timeout(Duration::from_secs(2), async { tokio::join!(first, second) }).await.expect("different gids were head-of-line blocked");
     assert_eq!(first.unwrap().value, 1);
     assert_eq!(second.unwrap().value, 2);
     runtime.shutdown().await.unwrap();
@@ -228,13 +204,7 @@ async fn unrelated_gids_run_in_parallel() {
 async fn global_call_admission_rejects_immediately() {
     let mut config = test_config();
     config.max_inflight_calls = 1;
-    let runtime = LogicRuntime::new(
-        config,
-        memory_persistence(
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(Mutex::new(HashMap::new())),
-        ),
-    );
+    let runtime = LogicRuntime::new(config, memory_persistence(Arc::new(Mutex::new(HashMap::new())), Arc::new(Mutex::new(HashMap::new()))));
     let started = Arc::new(AtomicBool::new(false));
     let release = Arc::new(AtomicBool::new(false));
     let call_started = started.clone();
@@ -249,10 +219,7 @@ async fn global_call_admission_rejects_immediately() {
         .unwrap();
     wait_until(|| started.load(Ordering::Acquire)).await;
 
-    assert!(matches!(
-        runtime.try_use(2, 1, |_| ()),
-        Err(RejectReason::Calls)
-    ));
+    assert!(matches!(runtime.try_use(2, 1, |_| ()), Err(RejectReason::Calls)));
     release.store(true, Ordering::Release);
     first.await.unwrap();
     runtime.shutdown().await.unwrap();
@@ -263,13 +230,8 @@ async fn global_call_admission_rejects_immediately() {
 async fn global_kib_and_per_gid_admission_are_bounded() {
     let mut kib_config = test_config();
     kib_config.max_inflight_kib = 1;
-    let kib_runtime = LogicRuntime::new(
-        kib_config,
-        memory_persistence(
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(Mutex::new(HashMap::new())),
-        ),
-    );
+    let kib_runtime =
+        LogicRuntime::new(kib_config, memory_persistence(Arc::new(Mutex::new(HashMap::new())), Arc::new(Mutex::new(HashMap::new()))));
     let started = Arc::new(AtomicBool::new(false));
     let release = Arc::new(AtomicBool::new(false));
     let call_started = started.clone();
@@ -283,10 +245,7 @@ async fn global_kib_and_per_gid_admission_are_bounded() {
         })
         .unwrap();
     wait_until(|| started.load(Ordering::Acquire)).await;
-    assert!(matches!(
-        kib_runtime.try_use(2, 1, |_| ()),
-        Err(RejectReason::KiB)
-    ));
+    assert!(matches!(kib_runtime.try_use(2, 1, |_| ()), Err(RejectReason::KiB)));
     release.store(true, Ordering::Release);
     first.await.unwrap();
     kib_runtime.shutdown().await.unwrap();
@@ -294,13 +253,8 @@ async fn global_kib_and_per_gid_admission_are_bounded() {
 
     let mut gid_config = test_config();
     gid_config.max_calls_per_gid = 1;
-    let gid_runtime = LogicRuntime::new(
-        gid_config,
-        memory_persistence(
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(Mutex::new(HashMap::new())),
-        ),
-    );
+    let gid_runtime =
+        LogicRuntime::new(gid_config, memory_persistence(Arc::new(Mutex::new(HashMap::new())), Arc::new(Mutex::new(HashMap::new()))));
     let started = Arc::new(AtomicBool::new(false));
     let release = Arc::new(AtomicBool::new(false));
     let call_started = started.clone();
@@ -314,10 +268,7 @@ async fn global_kib_and_per_gid_admission_are_bounded() {
         })
         .unwrap();
     wait_until(|| started.load(Ordering::Acquire)).await;
-    assert!(matches!(
-        gid_runtime.try_use(1, 1, |_| ()),
-        Err(RejectReason::Gid)
-    ));
+    assert!(matches!(gid_runtime.try_use(1, 1, |_| ()), Err(RejectReason::Gid)));
     release.store(true, Ordering::Release);
     first.await.unwrap();
     gid_runtime.shutdown().await.unwrap();
@@ -345,11 +296,7 @@ async fn dirty_player_capacity_rejects_before_mutation() {
     );
     let runtime = LogicRuntime::new(config, persistence);
 
-    let first = runtime
-        .try_use(1, 1, |player| player.dirty = true)
-        .unwrap()
-        .await
-        .unwrap();
+    let first = runtime.try_use(1, 1, |player| player.dirty = true).unwrap().await.unwrap();
     assert!(first.persistence.is_err());
     wait_until(|| runtime.stats().active_gids == 0).await;
 
@@ -379,13 +326,8 @@ async fn dirty_player_capacity_rejects_before_mutation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn preload_is_async_outside_the_player_lock_but_inside_gid_serialization() {
-    let runtime = LogicRuntime::new(
-        test_config(),
-        memory_persistence(
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(Mutex::new(HashMap::new())),
-        ),
-    );
+    let runtime =
+        LogicRuntime::new(test_config(), memory_persistence(Arc::new(Mutex::new(HashMap::new())), Arc::new(Mutex::new(HashMap::new()))));
     let preload_started = Arc::new(AtomicBool::new(false));
     let release_preload = Arc::new(Semaphore::new(0));
     let started = preload_started.clone();
@@ -421,14 +363,7 @@ async fn preload_is_async_outside_the_player_lock_but_inside_gid_serialization()
     assert!(!second_ran.load(Ordering::Acquire));
 
     let other = runtime.try_use(2, 1, |_| 7).unwrap();
-    assert_eq!(
-        timeout(Duration::from_secs(1), other)
-            .await
-            .unwrap()
-            .unwrap()
-            .value,
-        7
-    );
+    assert_eq!(timeout(Duration::from_secs(1), other).await.unwrap().unwrap().value, 7);
     release_preload.add_permits(1);
     assert_eq!(first.await.unwrap().value, 42);
     second.await.unwrap();
@@ -438,13 +373,8 @@ async fn preload_is_async_outside_the_player_lock_but_inside_gid_serialization()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn preload_failure_skips_business_logic() {
-    let runtime = LogicRuntime::new(
-        test_config(),
-        memory_persistence(
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(Mutex::new(HashMap::new())),
-        ),
-    );
+    let runtime =
+        LogicRuntime::new(test_config(), memory_persistence(Arc::new(Mutex::new(HashMap::new())), Arc::new(Mutex::new(HashMap::new()))));
     let logic_ran = Arc::new(AtomicBool::new(false));
     let observed = logic_ran.clone();
     let error = runtime
@@ -468,10 +398,7 @@ async fn preload_failure_skips_business_logic() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dropping_the_call_does_not_cancel_accepted_logic() {
     let stored = Arc::new(Mutex::new(HashMap::new()));
-    let runtime = LogicRuntime::new(
-        test_config(),
-        memory_persistence(stored.clone(), Arc::new(Mutex::new(HashMap::new()))),
-    );
+    let runtime = LogicRuntime::new(test_config(), memory_persistence(stored.clone(), Arc::new(Mutex::new(HashMap::new()))));
     let executed = Arc::new(AtomicBool::new(false));
     let observed = executed.clone();
     let call = runtime
@@ -581,14 +508,7 @@ async fn save_gate_covers_logic_and_save_without_holding_player_mutex() {
     assert!(!second_ran.load(Ordering::Acquire));
 
     let other = runtime.try_use(2, 1, |_| 7).unwrap();
-    assert_eq!(
-        timeout(Duration::from_secs(1), other)
-            .await
-            .unwrap()
-            .unwrap()
-            .value,
-        7
-    );
+    assert_eq!(timeout(Duration::from_secs(1), other).await.unwrap().unwrap().value, 7);
     release_save.add_permits(1);
     first.await.unwrap();
     second.await.unwrap();
@@ -644,20 +564,13 @@ async fn xmongo_prepared_save_retries_an_unacknowledged_failure() {
         move |gid| {
             let collection = load_collection.clone();
             async move {
-                let mut data =
-                    DataPersister::new(MongoPlayerData::default(), "playerData", collection, gid);
+                let mut data = DataPersister::new(MongoPlayerData::default(), "playerData", collection, gid);
                 data.set_loaded();
                 Ok::<_, TestError>(MongoPlayer { data })
             }
         },
         move |player| {
-            let prepared = player.with(|state| {
-                state
-                    .data
-                    .prepare_save()
-                    .unwrap()
-                    .expect("dirty player must produce a prepared save")
-            });
+            let prepared = player.with(|state| state.data.prepare_save().unwrap().expect("dirty player must produce a prepared save"));
             let attempts = save_attempts.clone();
             async move {
                 tokio::task::yield_now().await;
@@ -695,10 +608,7 @@ async fn xmongo_prepared_save_retries_an_unacknowledged_failure() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn load_failure_completes_the_accepted_call() {
-    let persistence = Persistence::new(
-        |_| async { Err::<Player, _>(TestError("load failed")) },
-        |_| async { Ok::<_, TestError>(()) },
-    );
+    let persistence = Persistence::new(|_| async { Err::<Player, _>(TestError("load failed")) }, |_| async { Ok::<_, TestError>(()) });
     let runtime = LogicRuntime::new(test_config(), persistence);
     let error = runtime.try_use(1, 1, |_| ()).unwrap().await.unwrap_err();
     assert!(matches!(error, LogicCallError::Load(_)));
@@ -711,13 +621,8 @@ async fn load_failure_completes_the_accepted_call() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn shutdown_waits_for_the_same_drain_without_an_internal_timeout() {
-    let runtime = LogicRuntime::new(
-        test_config(),
-        memory_persistence(
-            Arc::new(Mutex::new(HashMap::new())),
-            Arc::new(Mutex::new(HashMap::new())),
-        ),
-    );
+    let runtime =
+        LogicRuntime::new(test_config(), memory_persistence(Arc::new(Mutex::new(HashMap::new())), Arc::new(Mutex::new(HashMap::new()))));
     let started = Arc::new(AtomicBool::new(false));
     let release = Arc::new(AtomicBool::new(false));
     let call_started = started.clone();
@@ -734,16 +639,9 @@ async fn shutdown_waits_for_the_same_drain_without_an_internal_timeout() {
 
     let shutdown = runtime.shutdown();
     tokio::pin!(shutdown);
-    assert!(
-        timeout(Duration::from_millis(20), &mut shutdown)
-            .await
-            .is_err()
-    );
+    assert!(timeout(Duration::from_millis(20), &mut shutdown).await.is_err());
     assert_eq!(runtime.state(), RuntimeState::Draining);
-    assert!(matches!(
-        runtime.try_use(2, 1, |_| ()),
-        Err(RejectReason::Draining)
-    ));
+    assert!(matches!(runtime.try_use(2, 1, |_| ()), Err(RejectReason::Draining)));
 
     release.store(true, Ordering::Release);
     call.await.unwrap();
@@ -771,19 +669,12 @@ async fn shutdown_save_failure_remains_retryable() {
         },
     );
     let runtime = LogicRuntime::new(test_config(), persistence);
-    let completed = runtime
-        .try_use(1, 1, |player| player.dirty = true)
-        .unwrap()
-        .await
-        .unwrap();
+    let completed = runtime.try_use(1, 1, |player| player.dirty = true).unwrap().await.unwrap();
     assert!(completed.persistence.is_err());
     wait_until(|| runtime.stats().active_gids == 0).await;
     assert_eq!(attempts.load(Ordering::Acquire), 1);
 
-    assert!(matches!(
-        runtime.shutdown().await,
-        Err(ShutdownError::Persistence(_))
-    ));
+    assert!(matches!(runtime.shutdown().await, Err(ShutdownError::Persistence(_))));
     assert_eq!(attempts.load(Ordering::Acquire), 2);
     assert_eq!(runtime.state(), RuntimeState::Draining);
     runtime.shutdown().await.unwrap();
@@ -815,11 +706,7 @@ async fn shutdown_uses_the_optional_batch_saver() {
         }
     });
     let runtime = LogicRuntime::new(test_config(), persistence);
-    let completed = runtime
-        .try_use(1, 1, |player| player.dirty = true)
-        .unwrap()
-        .await
-        .unwrap();
+    let completed = runtime.try_use(1, 1, |player| player.dirty = true).unwrap().await.unwrap();
     assert!(completed.persistence.is_err());
 
     runtime.shutdown().await.unwrap();

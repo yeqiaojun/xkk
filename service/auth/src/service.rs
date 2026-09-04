@@ -2,12 +2,10 @@ use std::{collections::HashMap, io, path::PathBuf, time::Duration};
 
 use thiserror::Error;
 use tokio::task::JoinHandle;
-use xframe::{
-    Application, ApplicationResult, DiscoveryConfig, FrameConfig, FrameHandle, FrameState,
-    HttpServerConfig, NodeConfig, RpcConfig, ServiceType, xmongo,
-};
+use xframe::{Application, ApplicationResult, DiscoveryConfig, FrameHandle, FrameState, NodeConfig, RpcConfig, ServiceConfig};
 use xkk_cache::load_service_online_counts;
 use xkk_protocol::pb;
+use xutil::ServiceType;
 
 use crate::api::{AuthApi, LOGIN_PATH, USE_ROLE_PATH};
 pub use xkk_config::AuthConfig as Config;
@@ -36,12 +34,12 @@ pub enum ServiceError {
     #[error(transparent)]
     Persist(#[from] xkk_persist::Error),
     #[error(transparent)]
-    Redis(#[from] xframe::xredis::Error),
+    Redis(#[from] xredis::Error),
     #[error(transparent)]
     Protocol(#[from] xkk_protocol::ProtocolError),
 }
 
-fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
+fn service_config(config: &Config) -> Result<ServiceConfig, ServiceError> {
     let metadata = HashMap::from([
         ("protocol".to_string(), "http".to_string()),
         ("login_path".to_string(), LOGIN_PATH.to_string()),
@@ -57,17 +55,7 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
     .with_versions(config.version.program, config.version.conf)
     .with_meta_data(metadata);
     let discovery = DiscoveryConfig::new(&config.infrastructure.etcd_dsn)?;
-    Ok(FrameConfig::new(node)
-        .with_discovery(discovery)
-        .with_mongo(xmongo::Config::new(&config.infrastructure.mongo_dsn)?)
-        .with_redis(xframe::xredis::RedisConfig::new(
-            &config.infrastructure.redis_dsn,
-        )?)
-        .with_http(HttpServerConfig::new(format!(
-            "{}:{}",
-            config.node.listen_host, config.node.http_port
-        ))?)
-        .with_rpc(RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)))
+    Ok(ServiceConfig::new(node).with_discovery(discovery).with_rpc(RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)))
 }
 
 pub fn config_path() -> Result<PathBuf, ServiceError> {
@@ -77,67 +65,67 @@ pub fn config_path() -> Result<PathBuf, ServiceError> {
 pub async fn run(config: Config) -> Result<(), ServiceError> {
     config.validate()?;
     let log_options = config.log.options("logs/auth.log");
-    let frame_config = frame_config(&config)?;
+    let service_config = service_config(&config)?;
     let cluster = config.node.cluster.clone();
     let instance_id = config.node.instance_id;
+    let http_addr = format!("{}:{}", config.node.listen_host, config.node.http_port);
     let log_guard = xlog::init_global(log_options)?;
 
     let service: Result<(), ServiceError> = async {
+        xkk_common::service_type::init();
         xkk_protocol::init_global_registry()?;
-        let mut prepared = xframe::prepare(frame_config).await?;
-        let frame = prepared.handle();
-        let mongo = frame
-            .mongo()
-            .expect("Auth FrameConfig always enables Mongo");
-        let redis = frame
-            .redis()
-            .expect("Auth FrameConfig always enables Redis");
-        let database = xkk_persist::Database::new(mongo)?;
-        let application_redis = redis.clone();
-        let api = AuthApi::new(frame.clone(), database.accounts(), redis, &config.security);
-        let login = api.clone();
-        let use_role = api.clone();
-        let ready_handle = frame.clone();
-        let http = xframe::xhttp::App::new()
-            .with_max_body_bytes(HTTP_MAX_BODY_BYTES)
-            .route(LOGIN_PATH, move |ctx, request: pb::AuthLoginReq| {
-                let api = login.clone();
-                async move { Ok(api.login(ctx, request).await) }
-            })?
-            .route(USE_ROLE_PATH, move |ctx, request: pb::AuthUseRoleReq| {
-                let api = use_role.clone();
-                async move { Ok(api.use_role(ctx, request).await) }
-            })?
-            .get("/healthz", |_| async { xframe::xhttp::StatusCode::OK })?
-            .get("/readyz", move |_| {
-                let frame = ready_handle.clone();
-                async move {
-                    if frame.state() == FrameState::Running {
-                        xframe::xhttp::StatusCode::OK
-                    } else {
-                        xframe::xhttp::StatusCode::SERVICE_UNAVAILABLE
+        let redis = xredis::Client::connect_config(xredis::RedisConfig::new(&config.infrastructure.redis_dsn)?).await?;
+        let mongo = match xmongo::Client::connect_config(xmongo::Config::new(&config.infrastructure.mongo_dsn)?).await {
+            Ok(mongo) => mongo,
+            Err(error) => {
+                redis.close();
+                return Err(error.into());
+            }
+        };
+        let result: Result<(), ServiceError> = async {
+            let mut prepared = xframe::prepare(service_config).await?;
+            let frame = prepared.handle();
+            let database = xkk_persist::Database::new(mongo.clone())?;
+            let application_redis = redis.clone();
+            let api = AuthApi::new(frame.clone(), database.accounts(), redis.clone(), &config.security);
+            let login = api.clone();
+            let use_role = api.clone();
+            let ready_handle = frame.clone();
+            let http = xframe::xhttp::App::new()
+                .with_max_body_bytes(HTTP_MAX_BODY_BYTES)
+                .route(LOGIN_PATH, move |ctx, request: pb::AuthLoginReq| {
+                    let api = login.clone();
+                    async move { Ok(api.login(ctx, request).await) }
+                })?
+                .route(USE_ROLE_PATH, move |ctx, request: pb::AuthUseRoleReq| {
+                    let api = use_role.clone();
+                    async move { Ok(api.use_role(ctx, request).await) }
+                })?
+                .get("/healthz", |_| async { xframe::xhttp::StatusCode::OK })?
+                .get("/readyz", move |_| {
+                    let frame = ready_handle.clone();
+                    async move {
+                        if frame.state() == FrameState::Running {
+                            xframe::xhttp::StatusCode::OK
+                        } else {
+                            xframe::xhttp::StatusCode::SERVICE_UNAVAILABLE
+                        }
                     }
-                }
-            })?;
-        prepared.set_http_app(http)?;
-        let frame = prepared
-            .start(AuthApplication::new(
-                cluster,
-                application_redis,
-                GATE_LOAD_REFRESH_INTERVAL,
-                METRICS_REPORT_INTERVAL,
-                api,
-            ))
-            .await?;
-        tracing::info!(instance_id, "Auth service started");
-        let shutdown = frame.run_until_shutdown_signal().await;
-        tracing::info!(
-            instance_id,
-            success = shutdown.is_ok(),
-            "Auth service stopped"
-        );
-        shutdown?;
-        Ok(())
+                })?;
+            prepared.set_http_app(http_addr, http)?;
+            let frame = prepared
+                .start(AuthApplication::new(cluster, application_redis, GATE_LOAD_REFRESH_INTERVAL, METRICS_REPORT_INTERVAL, api))
+                .await?;
+            tracing::info!(instance_id, "Auth service started");
+            let shutdown = frame.run_until_shutdown_signal().await;
+            tracing::info!(instance_id, success = shutdown.is_ok(), "Auth service stopped");
+            shutdown?;
+            Ok(())
+        }
+        .await;
+        mongo.shutdown().await;
+        redis.close();
+        result
     }
     .await;
     let log_close = log_guard.close().await;
@@ -148,7 +136,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
 
 struct AuthApplication {
     cluster: String,
-    redis: xframe::xredis::Client,
+    redis: xredis::Client,
     service_load_interval: Duration,
     metrics_interval: Duration,
     api: AuthApi,
@@ -157,41 +145,17 @@ struct AuthApplication {
 }
 
 impl AuthApplication {
-    fn new(
-        cluster: String,
-        redis: xframe::xredis::Client,
-        service_load_interval: Duration,
-        metrics_interval: Duration,
-        api: AuthApi,
-    ) -> Self {
-        Self {
-            cluster,
-            redis,
-            service_load_interval,
-            metrics_interval,
-            api,
-            service_load_task: None,
-            metrics_task: None,
-        }
+    fn new(cluster: String, redis: xredis::Client, service_load_interval: Duration, metrics_interval: Duration, api: AuthApi) -> Self {
+        Self { cluster, redis, service_load_interval, metrics_interval, api, service_load_task: None, metrics_task: None }
     }
 }
 
 impl Application for AuthApplication {
     async fn start(&mut self, frame: FrameHandle) -> ApplicationResult {
         frame.watch(xkk_common::service_type::GATE).await?;
-        refresh_service_online(
-            &frame,
-            &self.redis,
-            &self.cluster,
-            xkk_common::service_type::GATE,
-        )
-        .await?;
-        self.service_load_task = Some(spawn_service_loads(
-            frame.clone(),
-            self.redis.clone(),
-            self.cluster.clone(),
-            self.service_load_interval,
-        ));
+        refresh_service_online(&frame, &self.redis, &self.cluster, xkk_common::service_type::GATE).await?;
+        self.service_load_task =
+            Some(spawn_service_loads(frame.clone(), self.redis.clone(), self.cluster.clone(), self.service_load_interval));
         self.metrics_task = spawn_metrics(frame, self.api.clone(), self.metrics_interval);
         Ok(())
     }
@@ -205,37 +169,23 @@ impl Application for AuthApplication {
 
 async fn refresh_service_online(
     frame: &FrameHandle,
-    redis: &xframe::xredis::Client,
+    redis: &xredis::Client,
     cluster: &str,
     service_type: ServiceType,
 ) -> ApplicationResult {
     let instance_ids = frame.service_instance_ids(service_type)?;
-    let counts =
-        load_service_online_counts(redis, cluster, service_type.as_i32(), instance_ids).await?;
-    frame.update_online_counts(
-        service_type,
-        counts
-            .into_iter()
-            .map(|count| (count.instance_id, count.online_count)),
-    )?;
+    let counts = load_service_online_counts(redis, cluster, service_type.as_i32(), instance_ids).await?;
+    frame.update_online_counts(service_type, counts.into_iter().map(|count| (count.instance_id, count.online_count)))?;
     Ok(())
 }
 
-fn spawn_service_loads(
-    frame: FrameHandle,
-    redis: xframe::xredis::Client,
-    cluster: String,
-    interval: Duration,
-) -> JoinHandle<()> {
+fn spawn_service_loads(frame: FrameHandle, redis: xredis::Client, cluster: String, interval: Duration) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            if let Err(error) =
-                refresh_service_online(&frame, &redis, &cluster, xkk_common::service_type::GATE)
-                    .await
-            {
+            if let Err(error) = refresh_service_online(&frame, &redis, &cluster, xkk_common::service_type::GATE).await {
                 tracing::warn!(%error, "Auth Gate online refresh failed");
             }
         }
@@ -290,24 +240,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn example_config_builds_http_only_auth() {
+    fn example_config_builds_auth_service_runtime() {
         let config = Config::parse(
             include_str!("../../../config/common.yaml"),
             include_str!("../../../config/auth.yaml"),
             include_str!("../../../config/version.json"),
         )
         .unwrap();
-        let frame = frame_config(&config).unwrap();
+        let frame = service_config(&config).unwrap();
 
-        assert!(frame.http.is_some());
         assert!(frame.service_server.is_none());
-        assert_eq!(
-            frame.rpc,
-            RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)
-        );
-        assert_eq!(
-            frame.node.meta_data().get("login_path").unwrap(),
-            LOGIN_PATH
-        );
+        assert_eq!(frame.rpc, RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY));
+        assert_eq!(frame.node.meta_data().get("login_path").unwrap(), LOGIN_PATH);
     }
 }

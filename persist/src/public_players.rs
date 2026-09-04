@@ -114,20 +114,10 @@ impl PublicPlayers {
                     Ok::<(), Error>(())
                 }
             });
-        Self {
-            inner: Arc::new(PublicPlayersInner {
-                cache: XlruCache::new(PLAYER_CACHE_CAPACITY, options),
-                dirty,
-                metrics,
-            }),
-        }
+        Self { inner: Arc::new(PublicPlayersInner { cache: XlruCache::new(PLAYER_CACHE_CAPACITY, options), dirty, metrics }) }
     }
 
-    pub async fn read<R>(
-        &self,
-        gid: i64,
-        read: impl FnOnce(&pb::PublicPlayerData) -> R,
-    ) -> Result<R, PublicPlayerCacheError> {
+    pub async fn read<R>(&self, gid: i64, read: impl FnOnce(&pb::PublicPlayerData) -> R) -> Result<R, PublicPlayerCacheError> {
         let player = self.inner.cache.get_i64(gid).await?;
         Ok(player.read(read))
     }
@@ -183,12 +173,7 @@ impl PublicPlayers {
     }
 }
 
-async fn save_single(
-    store: &PublicPlayerStore,
-    metrics: &Metrics,
-    gid: i64,
-    player: &PublicPlayer,
-) {
+async fn save_single(store: &PublicPlayerStore, metrics: &Metrics, gid: i64, player: &PublicPlayer) {
     let Some(snapshot) = player.take_dirty_snapshot() else {
         return;
     };
@@ -202,15 +187,8 @@ async fn save_single(
     }
 }
 
-async fn save_batch(
-    store: &PublicPlayerStore,
-    metrics: &Metrics,
-    entries: Vec<(i64, Arc<PublicPlayer>)>,
-) {
-    let snapshots = entries
-        .into_iter()
-        .filter_map(|(_, player)| player.take_dirty_snapshot())
-        .collect::<Vec<_>>();
+async fn save_batch(store: &PublicPlayerStore, metrics: &Metrics, entries: Vec<(i64, Arc<PublicPlayer>)>) {
+    let snapshots = entries.into_iter().filter_map(|(_, player)| player.take_dirty_snapshot()).collect::<Vec<_>>();
     if snapshots.is_empty() {
         return;
     }

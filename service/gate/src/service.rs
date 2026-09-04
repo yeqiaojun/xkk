@@ -8,13 +8,9 @@ use std::{
 
 use thiserror::Error;
 use tokio::task::JoinHandle;
-use xframe::{
-    Application, ApplicationResult, DiscoveryConfig, FrameConfig, FrameHandle, NodeConfig,
-    RpcConfig, ServiceType,
-};
-use xkk_cache::{
-    delete_service_online, load_service_online_counts, publish_service_online, service_online_ttl,
-};
+use xframe::{Application, ApplicationResult, DiscoveryConfig, FrameHandle, NodeConfig, RpcConfig, ServiceConfig};
+use xkk_cache::{delete_service_online, load_service_online_counts, publish_service_online, service_online_ttl};
+use xutil::ServiceType;
 
 use crate::{
     gateway::{Gateway, GatewaySettings},
@@ -44,11 +40,11 @@ pub enum ServiceError {
     #[error("close Gate log worker: {0}")]
     LogClose(#[source] io::Error),
     #[error(transparent)]
-    Mongo(#[from] xframe::xmongo::Error),
+    Mongo(#[from] xmongo::Error),
     #[error(transparent)]
     Persist(#[from] xkk_persist::Error),
     #[error(transparent)]
-    Redis(#[from] xframe::xredis::Error),
+    Redis(#[from] xredis::Error),
     #[error(transparent)]
     Protocol(#[from] xkk_protocol::ProtocolError),
     #[error(transparent)]
@@ -58,22 +54,13 @@ pub enum ServiceError {
 fn network_server(config: &Config) -> xframe::xnet::ServerConfig {
     let mut listeners = Vec::with_capacity(3);
     if let Some(port) = config.listeners.tcp_port {
-        listeners.push(
-            xframe::xnet::ListenEndpoint::tcp(format!("{}:{port}", config.node.listen_host))
-                .external(),
-        );
+        listeners.push(xframe::xnet::ListenEndpoint::tcp(format!("{}:{port}", config.node.listen_host)).external());
     }
     if let Some(port) = config.listeners.kcp_port {
-        listeners.push(
-            xframe::xnet::ListenEndpoint::kcp(format!("{}:{port}", config.node.listen_host))
-                .external(),
-        );
+        listeners.push(xframe::xnet::ListenEndpoint::kcp(format!("{}:{port}", config.node.listen_host)).external());
     }
     if let Some(port) = config.listeners.websocket_port {
-        listeners.push(
-            xframe::xnet::ListenEndpoint::websocket(format!("{}:{port}", config.node.listen_host))
-                .external(),
-        );
+        listeners.push(xframe::xnet::ListenEndpoint::websocket(format!("{}:{port}", config.node.listen_host)).external());
     }
 
     let transport = xframe::xnet::TransportOptions::default()
@@ -83,23 +70,14 @@ fn network_server(config: &Config) -> xframe::xnet::ServerConfig {
     xframe::xnet::ServerConfig::new(listeners)
         .with_role(xframe::xnet::ConnectionRole::client())
         .with_transport(transport)
-        .with_admission(xframe::xnet::AdmissionConfig::new(
-            MAX_EXTERNAL_HANDSHAKES,
-            MAX_EXTERNAL_CONNECTIONS,
-        ))
+        .with_admission(xframe::xnet::AdmissionConfig::new(MAX_EXTERNAL_HANDSHAKES, MAX_EXTERNAL_CONNECTIONS))
 }
 
-fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
-    let primary_port = config
-        .listeners
-        .primary_port()
-        .expect("validated Gate config has an enabled primary transport");
+fn service_config(config: &Config) -> Result<ServiceConfig, ServiceError> {
+    let primary_port = config.listeners.primary_port().expect("validated Gate config has an enabled primary transport");
     let mut metadata = HashMap::from([
         ("protocol".to_string(), "client".to_string()),
-        (
-            "primary_transport".to_string(),
-            config.listeners.primary_transport.as_str().to_string(),
-        ),
+        ("primary_transport".to_string(), config.listeners.primary_transport.as_str().to_string()),
     ]);
     if let Some(port) = config.listeners.tcp_port {
         metadata.insert("tcp_port".to_string(), port.to_string());
@@ -109,10 +87,7 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
     }
     if let Some(port) = config.listeners.websocket_port {
         metadata.insert("websocket_port".to_string(), port.to_string());
-        metadata.insert(
-            "websocket_path".to_string(),
-            config.listeners.websocket_path.clone(),
-        );
+        metadata.insert("websocket_path".to_string(), config.listeners.websocket_path.clone());
     }
     let node = NodeConfig::new(
         &config.node.cluster,
@@ -124,15 +99,7 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
     .with_versions(config.version.program, config.version.conf)
     .with_meta_data(metadata);
     let discovery = DiscoveryConfig::new(&config.infrastructure.etcd_dsn)?;
-    Ok(FrameConfig::new(node)
-        .with_discovery(discovery)
-        .with_mongo(xframe::xmongo::Config::new(
-            &config.infrastructure.mongo_dsn,
-        )?)
-        .with_redis(xframe::xredis::RedisConfig::new(
-            &config.infrastructure.redis_dsn,
-        )?)
-        .with_rpc(RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)))
+    Ok(ServiceConfig::new(node).with_discovery(discovery).with_rpc(RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)))
 }
 
 fn gateway_settings(config: &Config) -> GatewaySettings {
@@ -150,7 +117,7 @@ pub fn config_path() -> Result<PathBuf, ServiceError> {
 pub async fn run(config: Config) -> Result<(), ServiceError> {
     config.validate()?;
     let log_options = config.log.options("logs/gate.log");
-    let frame_config = frame_config(&config)?;
+    let service_config = service_config(&config)?;
     let network_server = network_server(&config);
     let gateway_settings = gateway_settings(&config);
     let cluster = config.node.cluster.clone();
@@ -158,49 +125,47 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
     let log_guard = xlog::init_global(log_options)?;
 
     let service: Result<(), ServiceError> = async {
+        xkk_common::service_type::init();
         xkk_protocol::init_global_registry()?;
-        let mut prepared = xframe::prepare(frame_config).await?;
-        let handle = prepared.handle();
-        let redis = handle
-            .redis()
-            .expect("Gate FrameConfig always enables Redis");
-        let mongo = handle
-            .mongo()
-            .expect("Gate FrameConfig always enables Mongo");
-        let _database = xkk_persist::Database::new(mongo)?;
-        let application_redis = redis.clone();
-        let online_count = Arc::new(AtomicI32::new(0));
-        let sessions = ClientSessions::new(SessionConfig::HARD_LIMITS);
-        let gateway = Gateway::new(
-            handle,
-            prepared.rpc().clone(),
-            redis,
-            sessions,
-            online_count,
-            gateway_settings,
-        );
-        gateway.register_rpc(prepared.rpc())?;
-        prepared.add_server(network_server, gateway.clone());
-        let frame = prepared
-            .start(GateApplication::new(
-                cluster,
-                instance_id,
-                application_redis,
-                SERVICE_LOAD_PUBLISH_INTERVAL,
-                LOGIC_LOAD_REFRESH_INTERVAL,
-                METRICS_REPORT_INTERVAL,
-                gateway,
-            ))
-            .await?;
-        tracing::info!(instance_id, "Gate service started");
-        let shutdown = frame.run_until_shutdown_signal().await;
-        tracing::info!(
-            instance_id,
-            success = shutdown.is_ok(),
-            "Gate service stopped"
-        );
-        shutdown?;
-        Ok(())
+        let redis = xredis::Client::connect_config(xredis::RedisConfig::new(&config.infrastructure.redis_dsn)?).await?;
+        let mongo = match xmongo::Client::connect_config(xmongo::Config::new(&config.infrastructure.mongo_dsn)?).await {
+            Ok(mongo) => mongo,
+            Err(error) => {
+                redis.close();
+                return Err(error.into());
+            }
+        };
+        let result: Result<(), ServiceError> = async {
+            let mut prepared = xframe::prepare(service_config).await?;
+            let handle = prepared.handle();
+            let _database = xkk_persist::Database::new(mongo.clone())?;
+            let application_redis = redis.clone();
+            let online_count = Arc::new(AtomicI32::new(0));
+            let sessions = ClientSessions::new(SessionConfig::HARD_LIMITS);
+            let gateway = Gateway::new(handle, prepared.rpc().clone(), redis.clone(), sessions, online_count, gateway_settings);
+            gateway.register_rpc(prepared.rpc())?;
+            prepared.add_server(network_server, gateway.clone());
+            let frame = prepared
+                .start(GateApplication::new(
+                    cluster,
+                    instance_id,
+                    application_redis,
+                    SERVICE_LOAD_PUBLISH_INTERVAL,
+                    LOGIC_LOAD_REFRESH_INTERVAL,
+                    METRICS_REPORT_INTERVAL,
+                    gateway,
+                ))
+                .await?;
+            tracing::info!(instance_id, "Gate service started");
+            let shutdown = frame.run_until_shutdown_signal().await;
+            tracing::info!(instance_id, success = shutdown.is_ok(), "Gate service stopped");
+            shutdown?;
+            Ok(())
+        }
+        .await;
+        mongo.shutdown().await;
+        redis.close();
+        result
     }
     .await;
     let log_close = log_guard.close().await;
@@ -212,7 +177,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
 struct GateApplication {
     cluster: String,
     instance_id: i32,
-    redis: xframe::xredis::Client,
+    redis: xredis::Client,
     service_load_publish_interval: Duration,
     logic_refresh_interval: Duration,
     metrics_interval: Duration,
@@ -226,7 +191,7 @@ impl GateApplication {
     fn new(
         cluster: String,
         instance_id: i32,
-        redis: xframe::xredis::Client,
+        redis: xredis::Client,
         service_load_publish_interval: Duration,
         logic_refresh_interval: Duration,
         metrics_interval: Duration,
@@ -249,12 +214,8 @@ impl GateApplication {
 
 impl Application for GateApplication {
     async fn start(&mut self, frame: FrameHandle) -> ApplicationResult {
-        frame
-            .watch_and_connect(xkk_common::service_type::LOGIC)
-            .await?;
-        frame
-            .watch_and_connect(xkk_common::service_type::PUBLIC)
-            .await?;
+        frame.watch_and_connect(xkk_common::service_type::LOGIC).await?;
+        frame.watch_and_connect(xkk_common::service_type::PUBLIC).await?;
         publish_service_online(
             &self.redis,
             &self.cluster,
@@ -264,13 +225,7 @@ impl Application for GateApplication {
             service_online_ttl(self.service_load_publish_interval),
         )
         .await?;
-        refresh_service_online(
-            &frame,
-            &self.redis,
-            &self.cluster,
-            xkk_common::service_type::LOGIC,
-        )
-        .await?;
+        refresh_service_online(&frame, &self.redis, &self.cluster, xkk_common::service_type::LOGIC).await?;
         self.service_load_publish_task = Some(spawn_service_online_publish(
             self.redis.clone(),
             self.cluster.clone(),
@@ -278,31 +233,18 @@ impl Application for GateApplication {
             self.gateway.clone(),
             self.service_load_publish_interval,
         ));
-        self.logic_refresh_task = Some(spawn_logic_online_refresh(
-            frame.clone(),
-            self.redis.clone(),
-            self.cluster.clone(),
-            self.logic_refresh_interval,
-        ));
+        self.logic_refresh_task =
+            Some(spawn_logic_online_refresh(frame.clone(), self.redis.clone(), self.cluster.clone(), self.logic_refresh_interval));
         self.metrics_task = spawn_metrics(frame, self.gateway.clone(), self.metrics_interval);
         Ok(())
     }
 
     async fn shutdown(&mut self, _frame: FrameHandle) -> ApplicationResult {
-        stop_task(
-            &mut self.service_load_publish_task,
-            "Gate service load publish",
-        )
-        .await;
+        stop_task(&mut self.service_load_publish_task, "Gate service load publish").await;
         stop_task(&mut self.logic_refresh_task, "Gate Logic load refresh").await;
         stop_task(&mut self.metrics_task, "Gate metrics").await;
-        if let Err(error) = delete_service_online(
-            &self.redis,
-            &self.cluster,
-            xkk_common::service_type::GATE.as_i32(),
-            self.instance_id,
-        )
-        .await
+        if let Err(error) =
+            delete_service_online(&self.redis, &self.cluster, xkk_common::service_type::GATE.as_i32(), self.instance_id).await
         {
             tracing::warn!(%error, "Gate service online cleanup failed");
         }
@@ -313,24 +255,18 @@ impl Application for GateApplication {
 
 async fn refresh_service_online(
     frame: &FrameHandle,
-    redis: &xframe::xredis::Client,
+    redis: &xredis::Client,
     cluster: &str,
     service_type: ServiceType,
 ) -> ApplicationResult {
     let instance_ids = frame.service_instance_ids(service_type)?;
-    let counts =
-        load_service_online_counts(redis, cluster, service_type.as_i32(), instance_ids).await?;
-    frame.update_online_counts(
-        service_type,
-        counts
-            .into_iter()
-            .map(|count| (count.instance_id, count.online_count)),
-    )?;
+    let counts = load_service_online_counts(redis, cluster, service_type.as_i32(), instance_ids).await?;
+    frame.update_online_counts(service_type, counts.into_iter().map(|count| (count.instance_id, count.online_count)))?;
     Ok(())
 }
 
 fn spawn_service_online_publish(
-    redis: xframe::xredis::Client,
+    redis: xredis::Client,
     cluster: String,
     instance_id: i32,
     gateway: Gateway,
@@ -343,15 +279,8 @@ fn spawn_service_online_publish(
         loop {
             ticker.tick().await;
             let online_count = gateway.online_count();
-            if let Err(error) = publish_service_online(
-                &redis,
-                &cluster,
-                xkk_common::service_type::GATE.as_i32(),
-                instance_id,
-                online_count,
-                ttl,
-            )
-            .await
+            if let Err(error) =
+                publish_service_online(&redis, &cluster, xkk_common::service_type::GATE.as_i32(), instance_id, online_count, ttl).await
             {
                 tracing::warn!(online_count, %error, "Gate service online publish failed");
             }
@@ -359,21 +288,13 @@ fn spawn_service_online_publish(
     })
 }
 
-fn spawn_logic_online_refresh(
-    frame: FrameHandle,
-    redis: xframe::xredis::Client,
-    cluster: String,
-    interval: Duration,
-) -> JoinHandle<()> {
+fn spawn_logic_online_refresh(frame: FrameHandle, redis: xredis::Client, cluster: String, interval: Duration) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.tick().await;
         loop {
             ticker.tick().await;
-            if let Err(error) =
-                refresh_service_online(&frame, &redis, &cluster, xkk_common::service_type::LOGIC)
-                    .await
-            {
+            if let Err(error) = refresh_service_online(&frame, &redis, &cluster, xkk_common::service_type::LOGIC).await {
                 tracing::warn!(%error, "Gate Logic online refresh failed");
             }
         }
@@ -392,11 +313,7 @@ async fn stop_task(task: &mut Option<JoinHandle<()>>, name: &'static str) {
     }
 }
 
-fn spawn_metrics(
-    frame: FrameHandle,
-    gateway: Gateway,
-    interval: Duration,
-) -> Option<JoinHandle<()>> {
+fn spawn_metrics(frame: FrameHandle, gateway: Gateway, interval: Duration) -> Option<JoinHandle<()>> {
     if interval.is_zero() {
         return None;
     }
@@ -414,22 +331,10 @@ fn spawn_metrics(
             let online_count = gateway.online_count();
             let login = gateway.login_stats();
             let stats = frame.stats();
-            let write_queue_rejected = stats.sessions.outbound_rejected_full
-                + stats
-                    .listeners
-                    .iter()
-                    .map(|listener| listener.outbound_rejected_full)
-                    .sum::<u64>();
-            let handshakes_rejected = stats
-                .listeners
-                .iter()
-                .map(|listener| listener.rejected_external_handshakes)
-                .sum::<u64>();
-            let connections_rejected = stats
-                .listeners
-                .iter()
-                .map(|listener| listener.rejected_external_connections)
-                .sum::<u64>();
+            let write_queue_rejected =
+                stats.sessions.outbound_rejected_full + stats.listeners.iter().map(|listener| listener.outbound_rejected_full).sum::<u64>();
+            let handshakes_rejected = stats.listeners.iter().map(|listener| listener.rejected_external_handshakes).sum::<u64>();
+            let connections_rejected = stats.listeners.iter().map(|listener| listener.rejected_external_connections).sum::<u64>();
             if stats.rpc.pending_rejected > last_rpc_pending_rejected {
                 tracing::error!(
                     rejected = stats.rpc.pending_rejected - last_rpc_pending_rejected,
@@ -511,28 +416,17 @@ mod tests {
             include_str!("../../../config/version.json"),
         )
         .unwrap();
-        let frame = frame_config(&config).unwrap();
+        let frame = service_config(&config).unwrap();
         let server = network_server(&config);
 
         assert_eq!(server.listeners.len(), 3);
-        assert!(
-            server
-                .listeners
-                .iter()
-                .all(|listener| listener.is_external())
-        );
+        assert!(server.listeners.iter().all(|listener| listener.is_external()));
         assert!(frame.service_server.is_none());
         assert_eq!(frame.node.port(), 3201);
-        assert_eq!(
-            frame.rpc,
-            RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)
-        );
+        assert_eq!(frame.rpc, RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY));
         assert_eq!(server.transport.write_queue_capacity, 128);
         assert_eq!(server.transport.write_queue_byte_capacity, 4 * 1024 * 1024);
         assert_eq!(frame.service_client_transport.write_queue_capacity, 0);
-        assert_eq!(
-            frame.node.meta_data().get("primary_transport").unwrap(),
-            "tcp"
-        );
+        assert_eq!(frame.node.meta_data().get("primary_transport").unwrap(), "tcp");
     }
 }

@@ -2,7 +2,7 @@
 
 - Auth owns account login, role selection, admission limiting, and xtoken issuance.
 - Auth is HTTP-only. It watches Gate discovery state but creates no service connection.
-- Login and role admission use the shared Redis and Mongo dependencies from xframe.
+- Login and role admission use the Redis and Mongo clients owned by the Auth composition root.
 - `/v1/auth/login` issues the repository's xtoken. `/v1/auth/use-role` validates both xtoken
   contents and the Redis `gamer:{gid}` token before returning every configured Gate transport.
 - Auth periodically reads discovered Gate online counts from Redis, overlays its local xservice

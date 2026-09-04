@@ -18,10 +18,7 @@ pub fn descriptor_set() -> &'static [u8] {
 
 /// Builds the complete process registry: shared xproto controls followed by XKK messages.
 pub fn message_registry() -> Result<MessageRegistry, ProtocolError> {
-    let mut registry = MessageRegistry::from_descriptor_sets(&[
-        xproto::control::descriptor_set(),
-        descriptor_set(),
-    ])?;
+    let mut registry = MessageRegistry::from_descriptor_sets(&[xproto::control::descriptor_set(), descriptor_set()])?;
     xproto::control::register_control_messages(&mut registry)?;
     register_all_messages(&mut registry)?;
     Ok(registry)

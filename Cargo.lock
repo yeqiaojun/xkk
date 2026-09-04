@@ -3733,6 +3733,7 @@ name = "xetcd"
 version = "0.1.0"
 dependencies = [
  "etcd-client",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
@@ -3757,13 +3758,12 @@ dependencies = [
  "xetcd",
  "xfastid",
  "xhttp",
- "xmongo",
  "xnet",
  "xproto",
- "xredis",
  "xrpc",
  "xservice",
  "xtime",
+ "xutil",
 ]
 
 [[package]]
@@ -3777,6 +3777,7 @@ dependencies = [
  "http-body-util",
  "hyper-util",
  "prost",
+ "prost-reflect",
  "serde",
  "serde_json",
  "thiserror",
@@ -3784,8 +3785,10 @@ dependencies = [
  "tonic",
  "tower",
  "tracing",
+ "xproto",
  "xservice",
  "xtoken",
+ "xutil",
 ]
 
 [[package]]
@@ -3803,7 +3806,10 @@ dependencies = [
  "xkk-persist",
  "xkk-protocol",
  "xlog",
+ "xmongo",
+ "xredis",
  "xtoken",
+ "xutil",
 ]
 
 [[package]]
@@ -3860,7 +3866,10 @@ dependencies = [
  "xkk-persist",
  "xkk-protocol",
  "xlog",
+ "xmongo",
+ "xredis",
  "xtoken",
+ "xutil",
 ]
 
 [[package]]
@@ -3880,6 +3889,7 @@ dependencies = [
  "xlog",
  "xlru",
  "xmongo",
+ "xredis",
 ]
 
 [[package]]
@@ -3890,10 +3900,10 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
- "xframe",
  "xkk-common",
  "xkk-protocol",
  "xlru",
+ "xmongo",
 ]
 
 [[package]]
@@ -3926,6 +3936,8 @@ dependencies = [
  "xkk-persist",
  "xkk-protocol",
  "xlog",
+ "xmongo",
+ "xredis",
 ]
 
 [[package]]
@@ -3941,6 +3953,8 @@ dependencies = [
  "xkk-persist",
  "xkk-protocol",
  "xlog",
+ "xmongo",
+ "xredis",
 ]
 
 [[package]]
@@ -4093,6 +4107,7 @@ dependencies = [
 name = "xutil"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "xxhash-rust",
 ]
 

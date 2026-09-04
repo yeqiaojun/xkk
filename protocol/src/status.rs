@@ -16,15 +16,9 @@ pub mod code {
 }
 
 pub fn ok_status() -> pb::Status {
-    pb::Status {
-        code: code::OK,
-        message: String::new(),
-    }
+    pb::Status { code: code::OK, message: String::new() }
 }
 
 pub fn error_status(code: i32, message: impl Into<String>) -> pb::Status {
-    pb::Status {
-        code,
-        message: message.into(),
-    }
+    pb::Status { code, message: message.into() }
 }

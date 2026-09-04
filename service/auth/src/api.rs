@@ -1,13 +1,14 @@
 use std::{sync::Arc, time::Duration};
 
 use tokio::sync::Semaphore;
-use xframe::{FrameHandle, xservice::ServiceStatus};
+use xframe::FrameHandle;
 use xkk_cache::{enqueue_login, leave_login_queue, load_online, set_token};
 use xkk_common::{credential_hash, unix_millis, unix_seconds};
 use xkk_config::Security;
 use xkk_persist::AccountStore;
 use xkk_protocol::{code, error_status, ok_status, pb};
 use xtoken::TokenCoder;
+use xutil::{ServiceInstance, ServiceStatus};
 
 pub(crate) const LOGIN_PATH: &str = "/v1/auth/login";
 pub(crate) const USE_ROLE_PATH: &str = "/v1/auth/use-role";
@@ -29,12 +30,12 @@ const ACCOUNT_LOCK_TTL: Duration = Duration::from_secs(5);
 #[derive(Clone)]
 pub(crate) struct AuthApi {
     frame: FrameHandle,
-    redis: xframe::xredis::Client,
+    redis: xredis::Client,
     accounts: AccountStore,
     token: TokenCoder,
-    login_global: xframe::xredis::RateLimiter,
-    login_per_ip: xframe::xredis::RateLimiter,
-    role_admission: xframe::xredis::RateLimiter,
+    login_global: xredis::RateLimiter,
+    login_per_ip: xredis::RateLimiter,
+    role_admission: xredis::RateLimiter,
     inflight: Arc<Semaphore>,
     gate_player_capacity: i32,
     login_queue_capacity: i64,
@@ -44,30 +45,13 @@ pub(crate) struct AuthApi {
 }
 
 impl AuthApi {
-    pub(crate) fn new(
-        frame: FrameHandle,
-        accounts: AccountStore,
-        redis: xframe::xredis::Client,
-        security: &Security,
-    ) -> Self {
+    pub(crate) fn new(frame: FrameHandle, accounts: AccountStore, redis: xredis::Client, security: &Security) -> Self {
         Self {
             accounts,
             token: TokenCoder::new(&security.token_secret, security.token_expire_seconds),
-            login_global: redis.rate_limiter(
-                "xkk:auth:login:global",
-                LOGIN_GLOBAL_LIMIT,
-                LOGIN_RATE_WINDOW,
-            ),
-            login_per_ip: redis.rate_limiter(
-                "xkk:auth:login:ip",
-                LOGIN_PER_IP_LIMIT,
-                LOGIN_RATE_WINDOW,
-            ),
-            role_admission: redis.rate_limiter(
-                "xkk:auth:role:admission",
-                ROLE_ADMISSION_LIMIT,
-                ROLE_ADMISSION_WINDOW,
-            ),
+            login_global: redis.rate_limiter("xkk:auth:login:global", LOGIN_GLOBAL_LIMIT, LOGIN_RATE_WINDOW),
+            login_per_ip: redis.rate_limiter("xkk:auth:login:ip", LOGIN_PER_IP_LIMIT, LOGIN_RATE_WINDOW),
+            role_admission: redis.rate_limiter("xkk:auth:role:admission", ROLE_ADMISSION_LIMIT, ROLE_ADMISSION_WINDOW),
             inflight: Arc::new(Semaphore::new(HTTP_INFLIGHT_CAPACITY)),
             gate_player_capacity: GATE_PLAYER_CAPACITY,
             login_queue_capacity: LOGIN_QUEUE_CAPACITY,
@@ -83,16 +67,9 @@ impl AuthApi {
         self.inflight.available_permits()
     }
 
-    pub(crate) async fn login(
-        &self,
-        context: xframe::xhttp::RequestContext,
-        request: pb::AuthLoginReq,
-    ) -> pb::AuthLoginRsp {
+    pub(crate) async fn login(&self, context: xframe::xhttp::RequestContext, request: pb::AuthLoginReq) -> pb::AuthLoginRsp {
         let Ok(_permit) = self.inflight.clone().try_acquire_owned() else {
-            tracing::error!(
-                limit = HTTP_INFLIGHT_CAPACITY,
-                "Auth HTTP inflight hard limit exceeded"
-            );
+            tracing::error!(limit = HTTP_INFLIGHT_CAPACITY, "Auth HTTP inflight hard limit exceeded");
             return login_error(code::OVERLOADED, "Auth request capacity exhausted");
         };
         let Some(device) = request.device.as_ref() else {
@@ -107,10 +84,7 @@ impl AuthApi {
             return login_error(code::INVALID_ARGUMENT, "invalid Auth login request");
         }
 
-        let ip = context
-            .client_ip()
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
+        let ip = context.client_ip().map(|ip| ip.to_string()).unwrap_or_else(|| "unknown".to_string());
         let global = self.login_global.allow("all").await;
         let per_ip = self.login_per_ip.allow(&ip).await;
         match (global, per_ip) {
@@ -131,16 +105,10 @@ impl AuthApi {
             }
         }
 
-        let account = match self
-            .load_or_create_account(&request.account, &request.credential)
-            .await
-        {
+        let account = match self.load_or_create_account(&request.account, &request.credential).await {
             Ok(account) => account,
             Err(status) => {
-                return pb::AuthLoginRsp {
-                    status: Some(status),
-                    ..Default::default()
-                };
+                return pb::AuthLoginRsp { status: Some(status), ..Default::default() };
             }
         };
         let Some(role) = account.roles.first() else {
@@ -174,24 +142,13 @@ impl AuthApi {
         }
     }
 
-    async fn load_or_create_account(
-        &self,
-        account: &str,
-        credential: &str,
-    ) -> Result<pb::AccountData, pb::Status> {
+    async fn load_or_create_account(&self, account: &str, credential: &str) -> Result<pb::AccountData, pb::Status> {
         let lock_key = format!("xkk:account:lock:{account}");
         let lock = match self.redis.try_lock(lock_key, self.account_lock_ttl).await {
             Ok(Some(lock)) => lock,
             Ok(None) => {
-                tracing::error!(
-                    account,
-                    limit_seconds = ACCOUNT_LOCK_TTL.as_secs(),
-                    "Auth account lock hard limit reached"
-                );
-                return Err(error_status(
-                    code::RATE_LIMITED,
-                    "account login in progress",
-                ));
+                tracing::error!(account, limit_seconds = ACCOUNT_LOCK_TTL.as_secs(), "Auth account lock hard limit reached");
+                return Err(error_status(code::RATE_LIMITED, "account login in progress"));
             }
             Err(error) => {
                 tracing::error!(account, %error, "Auth account lock failed");
@@ -199,20 +156,14 @@ impl AuthApi {
             }
         };
 
-        let result = self
-            .load_or_create_account_locked(account, credential)
-            .await;
+        let result = self.load_or_create_account_locked(account, credential).await;
         if let Err(error) = lock.release().await {
             tracing::warn!(account, %error, "Auth account lock release failed");
         }
         result
     }
 
-    async fn load_or_create_account_locked(
-        &self,
-        account: &str,
-        credential: &str,
-    ) -> Result<pb::AccountData, pb::Status> {
+    async fn load_or_create_account_locked(&self, account: &str, credential: &str) -> Result<pb::AccountData, pb::Status> {
         let hash = credential_hash(account, credential);
         match self.accounts.load(account).await {
             Ok(Some(account)) if account.credential_hash == hash => Ok(account),
@@ -222,13 +173,7 @@ impl AuthApi {
                 let account = pb::AccountData {
                     account: account.to_string(),
                     credential_hash: hash,
-                    roles: vec![pb::Role {
-                        gid,
-                        sid: 0,
-                        name: format!("Player{gid}"),
-                        level: 1,
-                        icon: 0,
-                    }],
+                    roles: vec![pb::Role { gid, sid: 0, name: format!("Player{gid}"), level: 1, icon: 0 }],
                     created_at: unix_seconds(),
                 };
                 self.accounts.save(&account).await.map_err(|error| {
@@ -244,25 +189,15 @@ impl AuthApi {
         }
     }
 
-    pub(crate) async fn use_role(
-        &self,
-        _context: xframe::xhttp::RequestContext,
-        request: pb::AuthUseRoleReq,
-    ) -> pb::AuthUseRoleRsp {
+    pub(crate) async fn use_role(&self, _context: xframe::xhttp::RequestContext, request: pb::AuthUseRoleReq) -> pb::AuthUseRoleRsp {
         let Ok(_permit) = self.inflight.clone().try_acquire_owned() else {
-            tracing::error!(
-                limit = HTTP_INFLIGHT_CAPACITY,
-                "Auth HTTP inflight hard limit exceeded"
-            );
+            tracing::error!(limit = HTTP_INFLIGHT_CAPACITY, "Auth HTTP inflight hard limit exceeded");
             return use_role_error(code::OVERLOADED, "Auth request capacity exhausted");
         };
         if request.gid <= 0 || request.token.is_empty() || request.device_id.len() < 8 {
             return use_role_error(code::INVALID_ARGUMENT, "invalid role request");
         }
-        match self
-            .token
-            .simple_token_decode(&request.token, &request.device_id)
-        {
+        match self.token.simple_token_decode(&request.token, &request.device_id) {
             Ok(gid) if gid == request.gid => {}
             _ => return use_role_error(code::UNAUTHENTICATED, "token verification failed"),
         }
@@ -287,14 +222,7 @@ impl AuthApi {
             .filter(|gate| gate.enable && gate.healthy == ServiceStatus::Health)
             .map(|gate| (self.gate_player_capacity - gate.online_count).max(0) as i64)
             .sum::<i64>();
-        let position = match enqueue_login(
-            &self.redis,
-            request.gid,
-            unix_millis(),
-            self.login_queue_entry_ttl,
-        )
-        .await
-        {
+        let position = match enqueue_login(&self.redis, request.gid, unix_millis(), self.login_queue_entry_ttl).await {
             Ok(position) => position,
             Err(error) => {
                 tracing::error!(gid = request.gid, %error, "Auth login queue failed");
@@ -302,12 +230,7 @@ impl AuthApi {
             }
         };
         if position > self.login_queue_capacity {
-            tracing::error!(
-                gid = request.gid,
-                position,
-                limit = self.login_queue_capacity,
-                "Auth login queue hard limit exceeded"
-            );
+            tracing::error!(gid = request.gid, position, limit = self.login_queue_capacity, "Auth login queue hard limit exceeded");
             let _ = leave_login_queue(&self.redis, request.gid).await;
             return use_role_error(code::OVERLOADED, "login queue is full");
         }
@@ -316,28 +239,18 @@ impl AuthApi {
                 status: Some(ok_status()),
                 gid: request.gid,
                 endpoints: Vec::new(),
-                queue: Some(pb::LoginQueue {
-                    position,
-                    next_request_time: unix_seconds() + self.login_queue_retry_seconds,
-                }),
+                queue: Some(pb::LoginQueue { position, next_request_time: unix_seconds() + self.login_queue_retry_seconds }),
             };
         }
         match self.role_admission.allow("all").await {
             Ok(result) if result.allowed => {}
             Ok(_) => {
-                tracing::error!(
-                    gid = request.gid,
-                    limit = ROLE_ADMISSION_LIMIT,
-                    "Auth role admission hard limit exceeded"
-                );
+                tracing::error!(gid = request.gid, limit = ROLE_ADMISSION_LIMIT, "Auth role admission hard limit exceeded");
                 return pb::AuthUseRoleRsp {
                     status: Some(ok_status()),
                     gid: request.gid,
                     endpoints: Vec::new(),
-                    queue: Some(pb::LoginQueue {
-                        position,
-                        next_request_time: unix_seconds() + self.login_queue_retry_seconds,
-                    }),
+                    queue: Some(pb::LoginQueue { position, next_request_time: unix_seconds() + self.login_queue_retry_seconds }),
                 };
             }
             Err(error) => {
@@ -346,10 +259,7 @@ impl AuthApi {
             }
         }
 
-        let gate = match self
-            .frame
-            .pick_min_online_discovered_and_increment(xkk_common::service_type::GATE)
-        {
+        let gate = match self.frame.pick_min_online_discovered_and_increment(xkk_common::service_type::GATE) {
             Ok(gate) => gate,
             Err(error) => {
                 tracing::warn!(gid = request.gid, %error, "Auth Gate selection failed");
@@ -363,33 +273,15 @@ impl AuthApi {
         if let Err(error) = leave_login_queue(&self.redis, request.gid).await {
             tracing::warn!(gid = request.gid, %error, "Auth login queue removal failed");
         }
-        tracing::info!(
-            gid = request.gid,
-            gate_id = gate.instance_id,
-            endpoints = endpoints.len(),
-            "Auth role admitted"
-        );
-        pb::AuthUseRoleRsp {
-            status: Some(ok_status()),
-            gid: request.gid,
-            endpoints,
-            queue: None,
-        }
+        tracing::info!(gid = request.gid, gate_id = gate.instance_id, endpoints = endpoints.len(), "Auth role admitted");
+        pb::AuthUseRoleRsp { status: Some(ok_status()), gid: request.gid, endpoints, queue: None }
     }
 }
 
-fn gate_endpoints(gate: &xframe::xservice::ServiceInstance) -> Vec<pb::Endpoint> {
+fn gate_endpoints(gate: &ServiceInstance) -> Vec<pb::Endpoint> {
     let mut endpoints = Vec::with_capacity(3);
-    for (transport, port_key) in [
-        ("tcp", "tcp_port"),
-        ("kcp", "kcp_port"),
-        ("websocket", "websocket_port"),
-    ] {
-        let Some(port) = gate
-            .meta_data
-            .get(port_key)
-            .and_then(|port| port.parse::<u32>().ok())
-        else {
+    for (transport, port_key) in [("tcp", "tcp_port"), ("kcp", "kcp_port"), ("websocket", "websocket_port")] {
+        let Some(port) = gate.meta_data.get(port_key).and_then(|port| port.parse::<u32>().ok()) else {
             continue;
         };
         endpoints.push(pb::Endpoint {
@@ -397,10 +289,7 @@ fn gate_endpoints(gate: &xframe::xservice::ServiceInstance) -> Vec<pb::Endpoint>
             host: gate.host.clone(),
             port,
             path: if transport == "websocket" {
-                gate.meta_data
-                    .get("websocket_path")
-                    .cloned()
-                    .unwrap_or_else(|| "/".to_string())
+                gate.meta_data.get("websocket_path").cloned().unwrap_or_else(|| "/".to_string())
             } else {
                 String::new()
             },
@@ -410,17 +299,11 @@ fn gate_endpoints(gate: &xframe::xservice::ServiceInstance) -> Vec<pb::Endpoint>
 }
 
 fn login_error(error_code: i32, message: &'static str) -> pb::AuthLoginRsp {
-    pb::AuthLoginRsp {
-        status: Some(error_status(error_code, message)),
-        ..Default::default()
-    }
+    pb::AuthLoginRsp { status: Some(error_status(error_code, message)), ..Default::default() }
 }
 
 fn use_role_error(error_code: i32, message: &'static str) -> pb::AuthUseRoleRsp {
-    pb::AuthUseRoleRsp {
-        status: Some(error_status(error_code, message)),
-        ..Default::default()
-    }
+    pb::AuthUseRoleRsp { status: Some(error_status(error_code, message)), ..Default::default() }
 }
 
 #[cfg(test)]
@@ -431,20 +314,21 @@ mod tests {
 
     #[test]
     fn gate_endpoints_include_every_advertised_transport() {
-        let gate = xframe::xservice::ServiceInstance {
+        let gate = ServiceInstance {
             instance_id: 1,
             healthy: ServiceStatus::Health,
             load: 0,
             online_count: 0,
             pro_version: 0,
             conf_version: 0,
-            net_status: xframe::xservice::NetStatus::Invalid,
+            net_status: xutil::NetStatus::Invalid,
             enable: true,
             weight: 1,
             cluster_name: "local".to_string(),
             service_type: xkk_common::service_type::GATE,
             host: "gate.example".to_string(),
             port: 3201,
+            launch_time: 1,
             update_time: String::new(),
             meta_data: HashMap::from([
                 ("tcp_port".to_string(), "3201".to_string()),

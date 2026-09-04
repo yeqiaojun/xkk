@@ -11,10 +11,7 @@ use std::{
 
 use thiserror::Error;
 use tokio::task::JoinHandle;
-use xframe::{
-    Application, ApplicationResult, DiscoveryConfig, FrameConfig, FrameHandle, NodeConfig,
-    RpcConfig,
-};
+use xframe::{Application, ApplicationResult, DiscoveryConfig, FrameHandle, NodeConfig, RpcConfig, ServiceConfig};
 use xkk_cache::{delete_service_online, publish_service_online, service_online_ttl};
 
 use crate::{LogicConfig, LogicRuntime, player, stats::LoginMetrics};
@@ -38,18 +35,18 @@ pub enum ServiceError {
     #[error("close Logic log worker: {0}")]
     LogClose(#[source] io::Error),
     #[error(transparent)]
-    Mongo(#[from] xframe::xmongo::Error),
+    Mongo(#[from] xmongo::Error),
     #[error(transparent)]
     Persist(#[from] xkk_persist::Error),
     #[error(transparent)]
-    Redis(#[from] xframe::xredis::Error),
+    Redis(#[from] xredis::Error),
     #[error(transparent)]
     Rpc(#[from] xframe::xrpc::Error),
     #[error(transparent)]
     Protocol(#[from] xkk_protocol::ProtocolError),
 }
 
-fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
+fn service_config(config: &Config) -> Result<ServiceConfig, ServiceError> {
     let metadata = HashMap::from([("protocol".to_string(), "ss".to_string())]);
     let node = NodeConfig::new(
         &config.node.cluster,
@@ -61,19 +58,14 @@ fn frame_config(config: &Config) -> Result<FrameConfig, ServiceError> {
     .with_versions(config.version.program, config.version.conf)
     .with_meta_data(metadata);
     let discovery = DiscoveryConfig::new(&config.infrastructure.etcd_dsn)?;
-    let listener = xframe::xnet::ServerConfig::with_listener(xframe::xnet::ListenEndpoint::tcp(
-        format!("{}:{}", config.node.listen_host, config.node.service_port),
-    ));
+    let listener = xframe::xnet::ServerConfig::with_listener(xframe::xnet::ListenEndpoint::tcp(format!(
+        "{}:{}",
+        config.node.listen_host, config.node.service_port
+    )));
 
-    Ok(FrameConfig::new(node)
+    Ok(ServiceConfig::new(node)
         .with_discovery(discovery)
         .with_service_server(listener)
-        .with_mongo(xframe::xmongo::Config::new(
-            &config.infrastructure.mongo_dsn,
-        )?)
-        .with_redis(xframe::xredis::RedisConfig::new(
-            &config.infrastructure.redis_dsn,
-        )?)
         .with_rpc(RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)))
 }
 
@@ -88,64 +80,66 @@ pub fn config_path() -> Result<PathBuf, ServiceError> {
 pub async fn run(config: Config) -> Result<(), ServiceError> {
     config.validate()?;
     let log_options = config.log.options("logs/logic.log");
-    let frame_config = frame_config(&config)?;
+    let service_config = service_config(&config)?;
     let logic_config = logic_config();
     let cluster = config.node.cluster.clone();
     let instance_id = config.node.instance_id;
     let log_guard = xlog::init_global(log_options)?;
 
     let service: Result<(), ServiceError> = async {
+        xkk_common::service_type::init();
         xkk_protocol::init_global_registry()?;
-        let prepared = xframe::prepare(frame_config).await?;
-        let handle = prepared.handle();
-        let mongo = handle
-            .mongo()
-            .expect("Logic FrameConfig always enables Mongo");
-        let redis = handle
-            .redis()
-            .expect("Logic FrameConfig always enables Redis");
-        let database = xkk_persist::Database::new(mongo)?;
-        let application_redis = redis.clone();
-        let login_metrics = Arc::new(LoginMetrics::default());
-        let runtime = LogicRuntime::new(
-            logic_config,
-            player::persistence(database.players(), login_metrics.clone()),
-        );
-        let online_count = Arc::new(AtomicI32::new(0));
-        player::register_handlers(
-            prepared.rpc(),
-            handle,
-            redis,
-            runtime.clone(),
-            instance_id,
-            online_count.clone(),
-            RPC_CALL_TIMEOUT,
-            login_metrics.clone(),
-        )?;
-        let frame = prepared
-            .start(LogicApplication {
-                cluster,
+        let redis = xredis::Client::connect_config(xredis::RedisConfig::new(&config.infrastructure.redis_dsn)?).await?;
+        let mongo = match xmongo::Client::connect_config(xmongo::Config::new(&config.infrastructure.mongo_dsn)?).await {
+            Ok(mongo) => mongo,
+            Err(error) => {
+                redis.close();
+                return Err(error.into());
+            }
+        };
+        let result: Result<(), ServiceError> = async {
+            let prepared = xframe::prepare(service_config).await?;
+            let handle = prepared.handle();
+            let database = xkk_persist::Database::new(mongo.clone())?;
+            let application_redis = redis.clone();
+            let login_metrics = Arc::new(LoginMetrics::default());
+            let runtime = LogicRuntime::new(logic_config, player::persistence(database.players(), login_metrics.clone()));
+            let online_count = Arc::new(AtomicI32::new(0));
+            player::register_handlers(
+                prepared.rpc(),
+                handle,
+                redis.clone(),
+                runtime.clone(),
                 instance_id,
-                redis: application_redis,
-                service_load_interval: SERVICE_LOAD_PUBLISH_INTERVAL,
-                metrics_interval: METRICS_REPORT_INTERVAL,
-                logic_config,
-                runtime,
-                online_count,
-                login_metrics,
-                service_load_task: None,
-                metrics_task: None,
-            })
-            .await?;
-        tracing::info!(instance_id, "Logic service started");
-        let shutdown = frame.run_until_shutdown_signal().await;
-        tracing::info!(
-            instance_id,
-            success = shutdown.is_ok(),
-            "Logic service stopped"
-        );
-        shutdown?;
-        Ok(())
+                online_count.clone(),
+                RPC_CALL_TIMEOUT,
+                login_metrics.clone(),
+            )?;
+            let frame = prepared
+                .start(LogicApplication {
+                    cluster,
+                    instance_id,
+                    redis: application_redis,
+                    service_load_interval: SERVICE_LOAD_PUBLISH_INTERVAL,
+                    metrics_interval: METRICS_REPORT_INTERVAL,
+                    logic_config,
+                    runtime,
+                    online_count,
+                    login_metrics,
+                    service_load_task: None,
+                    metrics_task: None,
+                })
+                .await?;
+            tracing::info!(instance_id, "Logic service started");
+            let shutdown = frame.run_until_shutdown_signal().await;
+            tracing::info!(instance_id, success = shutdown.is_ok(), "Logic service stopped");
+            shutdown?;
+            Ok(())
+        }
+        .await;
+        mongo.shutdown().await;
+        redis.close();
+        result
     }
     .await;
     let log_close = log_guard.close().await;
@@ -157,7 +151,7 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
 struct LogicApplication {
     cluster: String,
     instance_id: i32,
-    redis: xframe::xredis::Client,
+    redis: xredis::Client,
     service_load_interval: Duration,
     metrics_interval: Duration,
     logic_config: LogicConfig,
@@ -171,9 +165,7 @@ struct LogicApplication {
 impl Application for LogicApplication {
     async fn start(&mut self, frame: FrameHandle) -> ApplicationResult {
         frame.watch(xkk_common::service_type::GATE).await?;
-        frame
-            .watch_and_connect(xkk_common::service_type::PUBLIC)
-            .await?;
+        frame.watch_and_connect(xkk_common::service_type::PUBLIC).await?;
         let online_count = self.online_count.load(Ordering::Acquire);
         publish_service_online(
             &self.redis,
@@ -198,33 +190,20 @@ impl Application for LogicApplication {
             max_calls_per_gid = self.logic_config.max_calls_per_gid,
             "Logic Runtime capacity configured"
         );
-        self.metrics_task = spawn_metrics(
-            frame,
-            self.runtime.clone(),
-            self.online_count.clone(),
-            self.login_metrics.clone(),
-            self.metrics_interval,
-        );
+        self.metrics_task =
+            spawn_metrics(frame, self.runtime.clone(), self.online_count.clone(), self.login_metrics.clone(), self.metrics_interval);
         Ok(())
     }
 
     async fn shutdown(&mut self, frame: FrameHandle) -> ApplicationResult {
         stop_task(&mut self.service_load_task, "Logic service load").await;
-        if let Err(error) = delete_service_online(
-            &self.redis,
-            &self.cluster,
-            xkk_common::service_type::LOGIC.as_i32(),
-            self.instance_id,
-        )
-        .await
+        if let Err(error) =
+            delete_service_online(&self.redis, &self.cluster, xkk_common::service_type::LOGIC.as_i32(), self.instance_id).await
         {
             tracing::warn!(%error, "Logic service online cleanup failed");
         }
         stop_task(&mut self.metrics_task, "Logic metrics").await;
-        self.runtime
-            .shutdown()
-            .await
-            .map_err(|error| Box::new(error) as xframe::ApplicationError)?;
+        self.runtime.shutdown().await.map_err(|error| Box::new(error) as xframe::ApplicationError)?;
         let logic = self.runtime.stats();
         let rpc = frame.stats().rpc;
         tracing::info!(
@@ -241,7 +220,7 @@ impl Application for LogicApplication {
 }
 
 fn spawn_service_online(
-    redis: xframe::xredis::Client,
+    redis: xredis::Client,
     cluster: String,
     instance_id: i32,
     online_count: Arc<AtomicI32>,
@@ -254,15 +233,8 @@ fn spawn_service_online(
         loop {
             ticker.tick().await;
             let online_count = online_count.load(Ordering::Acquire);
-            if let Err(error) = publish_service_online(
-                &redis,
-                &cluster,
-                xkk_common::service_type::LOGIC.as_i32(),
-                instance_id,
-                online_count,
-                ttl,
-            )
-            .await
+            if let Err(error) =
+                publish_service_online(&redis, &cluster, xkk_common::service_type::LOGIC.as_i32(), instance_id, online_count, ttl).await
             {
                 tracing::warn!(online_count, %error, "Logic service online publish failed");
             }
@@ -308,11 +280,7 @@ fn spawn_metrics(
             let logic_stats = runtime.stats();
             let login = login_metrics.snapshot();
             let write_queue_rejected = frame_stats.sessions.outbound_rejected_full
-                + frame_stats
-                    .listeners
-                    .iter()
-                    .map(|listener| listener.outbound_rejected_full)
-                    .sum::<u64>();
+                + frame_stats.listeners.iter().map(|listener| listener.outbound_rejected_full).sum::<u64>();
             if frame_stats.rpc.pending_rejected > last_rpc_pending_rejected {
                 tracing::error!(
                     rejected = frame_stats.rpc.pending_rejected - last_rpc_pending_rejected,
@@ -426,24 +394,16 @@ mod config_tests {
         )
         .unwrap();
         let logic = logic_config();
-        let frame = frame_config(&config).unwrap();
+        let frame = service_config(&config).unwrap();
 
         assert_eq!(logic.max_calls_per_gid, 64);
         assert_eq!(logic.shards, 128);
         assert_eq!(config.version.conf, 0);
-        assert_eq!(
-            frame.rpc,
-            RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY)
-        );
+        assert_eq!(frame.rpc, RpcConfig::default().with_pending_capacity(RPC_PENDING_CAPACITY));
         assert_eq!(frame.service_client_transport.write_queue_capacity, 0);
         let server = frame.service_server.as_ref().unwrap();
         assert_eq!(server.transport.write_queue_capacity, 0);
-        assert!(
-            server
-                .listeners
-                .iter()
-                .all(|listener| !listener.is_external())
-        );
+        assert!(server.listeners.iter().all(|listener| !listener.is_external()));
         assert_eq!(frame.node.meta_data().get("protocol").unwrap(), "ss");
     }
 }

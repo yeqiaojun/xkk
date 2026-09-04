@@ -15,20 +15,11 @@ impl PublicPlayer {
         assert!(gid > 0, "Public player gid must be positive");
         data.gid = gid;
         data.mail.get_or_insert_default();
-        Self {
-            data: RwLock::new(data),
-            dirty: AtomicBool::new(false),
-        }
+        Self { data: RwLock::new(data), dirty: AtomicBool::new(false) }
     }
 
     pub(crate) fn empty(gid: i64) -> Self {
-        Self::new(
-            gid,
-            pb::PublicPlayerData {
-                gid,
-                mail: Some(pb::MailData { mails: Vec::new() }),
-            },
-        )
+        Self::new(gid, pb::PublicPlayerData { gid, mail: Some(pb::MailData { mails: Vec::new() }) })
     }
 
     pub(crate) fn read<R>(&self, read: impl FnOnce(&pb::PublicPlayerData) -> R) -> R {
@@ -36,11 +27,7 @@ impl PublicPlayer {
         read(&data)
     }
 
-    pub(crate) fn update<R>(
-        &self,
-        update: impl FnOnce(&mut pb::PublicPlayerData) -> (R, bool),
-        on_dirty: impl FnOnce(),
-    ) -> R {
+    pub(crate) fn update<R>(&self, update: impl FnOnce(&mut pb::PublicPlayerData) -> (R, bool), on_dirty: impl FnOnce()) -> R {
         let mut data = self.data.write().expect("Public player data lock poisoned");
         let (result, changed) = update(&mut data);
         if changed {
@@ -52,9 +39,7 @@ impl PublicPlayer {
 
     pub(crate) fn take_dirty_snapshot(&self) -> Option<pb::PublicPlayerData> {
         let data = self.data.write().expect("Public player data lock poisoned");
-        self.dirty
-            .swap(false, Ordering::AcqRel)
-            .then(|| data.clone())
+        self.dirty.swap(false, Ordering::AcqRel).then(|| data.clone())
     }
 
     pub(crate) fn remove_registration_if_clean(&self, remove: impl FnOnce()) {
@@ -99,10 +84,7 @@ mod tests {
         player.update(
             |data| {
                 let mail = data.mail.as_mut().unwrap();
-                mail.mails.push(pb::Mail {
-                    mail_id: 7,
-                    ..Default::default()
-                });
+                mail.mails.push(pb::Mail { mail_id: 7, ..Default::default() });
                 ((), true)
             },
             || registered = true,
