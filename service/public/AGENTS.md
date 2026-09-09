@@ -9,7 +9,8 @@
   add a Redis lease or a separate player-lock registry. Topology changes must drain old player
   routes before allowing overlapping ownership.
 - Public records changed gids in a concurrent dirty set and flushes them to Mongo in batches every
-  two minutes and once during graceful shutdown. Saving clears dirty state before I/O; failures are
+  two minutes using a monotonic-time task and once during graceful shutdown after
+  xrpc incoming handlers have drained. Stop the periodic task cooperatively between flushes; never abort an active save. Saving clears dirty state before I/O; failures are
   logged and treated as saved without retry or rollback. This deliberately accepts crash-window and
   active-entry-eviction data loss in exchange for throughput.
 - A missing Mongo document loads as a clean empty Public Player Data aggregate. Reads do not create

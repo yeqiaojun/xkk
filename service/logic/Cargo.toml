@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+xkk-app.workspace = true
 prost.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -14,12 +15,11 @@ xkk-config.workspace = true
 xkk-persist.workspace = true
 xkk-protocol.workspace = true
 xframe.workspace = true
-xlog.workspace = true
 xlru.workspace = true
-xmongo.workspace = true
 xredis.workspace = true
 
 [dev-dependencies]
+xmongo.workspace = true
 tokio.workspace = true
 
 [[bench]]

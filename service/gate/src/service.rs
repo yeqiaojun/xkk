@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    io,
     path::PathBuf,
     sync::{Arc, atomic::AtomicI32},
     time::{Duration, Instant},
@@ -32,21 +31,13 @@ const METRICS_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Debug, Error)]
 pub enum ServiceError {
     #[error(transparent)]
+    App(#[from] xkk_app::Error),
+    #[error(transparent)]
     Config(#[from] xkk_config::ConfigError),
     #[error(transparent)]
     Frame(#[from] xframe::Error),
     #[error(transparent)]
-    Log(#[from] xlog::Error),
-    #[error("close Gate log worker: {0}")]
-    LogClose(#[source] io::Error),
-    #[error(transparent)]
-    Mongo(#[from] xmongo::Error),
-    #[error(transparent)]
     Persist(#[from] xkk_persist::Error),
-    #[error(transparent)]
-    Redis(#[from] xredis::Error),
-    #[error(transparent)]
-    Protocol(#[from] xkk_protocol::ProtocolError),
     #[error(transparent)]
     Rpc(#[from] xframe::xrpc::Error),
 }
@@ -122,56 +113,35 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
     let gateway_settings = gateway_settings(&config);
     let cluster = config.node.cluster.clone();
     let instance_id = config.node.instance_id;
-    let log_guard = xlog::init_global(log_options)?;
-
-    let service: Result<(), ServiceError> = async {
-        xkk_common::service_type::init();
-        xkk_protocol::init_global_registry()?;
-        let redis = xredis::Client::connect_config(xredis::RedisConfig::new(&config.infrastructure.redis_dsn)?).await?;
-        let mongo = match xmongo::Client::connect_config(xmongo::Config::new(&config.infrastructure.mongo_dsn)?).await {
-            Ok(mongo) => mongo,
-            Err(error) => {
-                redis.close();
-                return Err(error.into());
-            }
-        };
-        let result: Result<(), ServiceError> = async {
-            let mut prepared = xframe::prepare(service_config).await?;
-            let handle = prepared.handle();
-            let _database = xkk_persist::Database::new(mongo.clone())?;
-            let application_redis = redis.clone();
-            let online_count = Arc::new(AtomicI32::new(0));
-            let sessions = ClientSessions::new(SessionConfig::HARD_LIMITS);
-            let gateway = Gateway::new(handle, prepared.rpc().clone(), redis.clone(), sessions, online_count, gateway_settings);
-            gateway.register_rpc(prepared.rpc())?;
-            prepared.add_server(network_server, gateway.clone());
-            let frame = prepared
-                .start(GateApplication::new(
-                    cluster,
-                    instance_id,
-                    application_redis,
-                    SERVICE_LOAD_PUBLISH_INTERVAL,
-                    LOGIC_LOAD_REFRESH_INTERVAL,
-                    METRICS_REPORT_INTERVAL,
-                    gateway,
-                ))
-                .await?;
-            tracing::info!(instance_id, "Gate service started");
-            let shutdown = frame.run_until_shutdown_signal().await;
-            tracing::info!(instance_id, success = shutdown.is_ok(), "Gate service stopped");
-            shutdown?;
-            Ok(())
-        }
-        .await;
-        mongo.shutdown().await;
-        redis.close();
-        result
-    }
-    .await;
-    let log_close = log_guard.close().await;
-    service?;
-    log_close.map_err(ServiceError::LogClose)?;
-    Ok(())
+    xkk_app::run(log_options, &config.infrastructure, |resources| async move {
+        let xkk_app::Resources { mongo, redis } = resources;
+        let mut prepared = xframe::prepare(service_config).await?;
+        let handle = prepared.handle();
+        let _database = xkk_persist::Database::new(mongo.clone())?;
+        let application_redis = redis.clone();
+        let online_count = Arc::new(AtomicI32::new(0));
+        let sessions = ClientSessions::new(SessionConfig::HARD_LIMITS);
+        let gateway = Gateway::new(handle, redis.clone(), sessions, online_count, gateway_settings);
+        gateway.register_rpc(prepared.rpc())?;
+        prepared.add_server(network_server, gateway.clone());
+        let frame = prepared
+            .start(GateApplication::new(
+                cluster,
+                instance_id,
+                application_redis,
+                SERVICE_LOAD_PUBLISH_INTERVAL,
+                LOGIC_LOAD_REFRESH_INTERVAL,
+                METRICS_REPORT_INTERVAL,
+                gateway,
+            ))
+            .await?;
+        tracing::info!(instance_id, "Gate service started");
+        let shutdown = frame.run_until_shutdown_signal().await;
+        tracing::info!(instance_id, success = shutdown.is_ok(), "Gate service stopped");
+        shutdown?;
+        Ok(())
+    })
+    .await
 }
 
 struct GateApplication {

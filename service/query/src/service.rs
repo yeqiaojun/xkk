@@ -1,4 +1,4 @@
-use std::{collections::HashMap, io, path::PathBuf, time::Duration};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use thiserror::Error;
 use tokio::task::JoinHandle;
@@ -18,23 +18,15 @@ const METRICS_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Debug, Error)]
 pub enum ServiceError {
     #[error(transparent)]
+    App(#[from] xkk_app::Error),
+    #[error(transparent)]
     Config(#[from] xkk_config::ConfigError),
     #[error(transparent)]
     Frame(#[from] xframe::Error),
     #[error(transparent)]
     Http(#[from] xframe::xhttp::HttpError),
     #[error(transparent)]
-    Log(#[from] xlog::Error),
-    #[error("close Query log worker: {0}")]
-    LogClose(#[source] io::Error),
-    #[error(transparent)]
-    Mongo(#[from] xmongo::Error),
-    #[error(transparent)]
     Persist(#[from] xkk_persist::Error),
-    #[error(transparent)]
-    Redis(#[from] xredis::Error),
-    #[error(transparent)]
-    Protocol(#[from] xkk_protocol::ProtocolError),
 }
 
 fn service_config(config: &Config) -> Result<ServiceConfig, ServiceError> {
@@ -67,61 +59,40 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
     let service_config = service_config(&config)?;
     let instance_id = config.node.instance_id;
     let http_addr = format!("{}:{}", config.node.listen_host, config.node.http_port);
-    let log_guard = xlog::init_global(log_options)?;
-
-    let service: Result<(), ServiceError> = async {
-        xkk_common::service_type::init();
-        xkk_protocol::init_global_registry()?;
-        let redis = xredis::Client::connect_config(xredis::RedisConfig::new(&config.infrastructure.redis_dsn)?).await?;
-        let mongo = match xmongo::Client::connect_config(xmongo::Config::new(&config.infrastructure.mongo_dsn)?).await {
-            Ok(mongo) => mongo,
-            Err(error) => {
-                redis.close();
-                return Err(error.into());
-            }
-        };
-        let result: Result<(), ServiceError> = async {
-            let mut prepared = xframe::prepare(service_config).await?;
-            let handle = prepared.handle();
-            let database = xkk_persist::Database::new(mongo.clone())?;
-            let api = QueryApi::new(database.players());
-            let ready_handle = handle.clone();
-            let gamer_info = api.clone();
-            let http = xframe::xhttp::App::new()
-                .with_max_body_bytes(HTTP_MAX_BODY_BYTES)
-                .route("/v1/query/gamers", move |_ctx, request: pb::GamerInfoReq| {
-                    let api = gamer_info.clone();
-                    async move { Ok(api.gamer_info(request).await) }
-                })?
-                .get("/healthz", |_| async { xframe::xhttp::StatusCode::OK })?
-                .get("/readyz", move |_| {
-                    let frame = ready_handle.clone();
-                    async move {
-                        if frame.state() == FrameState::Running {
-                            xframe::xhttp::StatusCode::OK
-                        } else {
-                            xframe::xhttp::StatusCode::SERVICE_UNAVAILABLE
-                        }
+    xkk_app::run(log_options, &config.infrastructure, |resources| async move {
+        let xkk_app::Resources { mongo, redis: _ } = resources;
+        let mut prepared = xframe::prepare(service_config).await?;
+        let handle = prepared.handle();
+        let database = xkk_persist::Database::new(mongo.clone())?;
+        let api = QueryApi::new(database.players());
+        let ready_handle = handle.clone();
+        let gamer_info = api.clone();
+        let http = xframe::xhttp::App::new()
+            .with_max_body_bytes(HTTP_MAX_BODY_BYTES)
+            .route("/v1/query/gamers", move |_ctx, request: pb::GamerInfoReq| {
+                let api = gamer_info.clone();
+                async move { Ok(api.gamer_info(request).await) }
+            })?
+            .get("/healthz", |_| async { xframe::xhttp::StatusCode::OK })?
+            .get("/readyz", move |_| {
+                let frame = ready_handle.clone();
+                async move {
+                    if frame.state() == FrameState::Running {
+                        xframe::xhttp::StatusCode::OK
+                    } else {
+                        xframe::xhttp::StatusCode::SERVICE_UNAVAILABLE
                     }
-                })?;
-            prepared.set_http_app(http_addr, http)?;
-            let frame = prepared.start(QueryApplication::new(METRICS_REPORT_INTERVAL, api)).await?;
-            tracing::info!(instance_id, "Query service started");
-            let shutdown = frame.run_until_shutdown_signal().await;
-            tracing::info!(instance_id, success = shutdown.is_ok(), "Query service stopped");
-            shutdown?;
-            Ok(())
-        }
-        .await;
-        mongo.shutdown().await;
-        redis.close();
-        result
-    }
-    .await;
-    let log_close = log_guard.close().await;
-    service?;
-    log_close.map_err(ServiceError::LogClose)?;
-    Ok(())
+                }
+            })?;
+        prepared.set_http_app(http_addr, http)?;
+        let frame = prepared.start(QueryApplication::new(METRICS_REPORT_INTERVAL, api)).await?;
+        tracing::info!(instance_id, "Query service started");
+        let shutdown = frame.run_until_shutdown_signal().await;
+        tracing::info!(instance_id, success = shutdown.is_ok(), "Query service stopped");
+        shutdown?;
+        Ok(())
+    })
+    .await
 }
 
 struct QueryApplication {

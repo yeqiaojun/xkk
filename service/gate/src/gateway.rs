@@ -49,7 +49,6 @@ pub(crate) struct Gateway {
 impl Gateway {
     pub fn new(
         frame: FrameHandle,
-        rpc: RpcManager,
         redis: xredis::Client,
         sessions: ClientSessions,
         online_count: Arc<AtomicI32>,
@@ -59,7 +58,6 @@ impl Gateway {
         Self {
             state: Arc::new(GatewayState {
                 frame,
-                rpc,
                 redis,
                 sessions,
                 token: TokenCoder::new(settings.token_secret, settings.token_expire_seconds),
@@ -129,7 +127,7 @@ impl Gateway {
         while cleanup.join_next().await.is_some() {}
 
         let stats = self.state.sessions.stats();
-        let rpc = self.state.rpc.stats();
+        let rpc = self.state.frame.stats().rpc;
         let connection_workers = self.workers.lock().expect("Gate worker map poisoned").len();
         tracing::info!(
             online_players = self.online_count(),
@@ -150,8 +148,8 @@ impl Gateway {
 impl GatewayState {
     async fn cleanup_shutdown_session(&self, session: crate::session::ClosingSession) {
         if let Err(error) = self
-            .rpc
-            .send_server(
+            .frame
+            .send_to(
                 xkk_common::service_type::LOGIC,
                 session.routes.logic_id,
                 &pb::LogicDisconnectNtf { gid: session.gid, gate_id: self.gate_id, player_session: session.session_id },
@@ -249,7 +247,6 @@ struct ClientWorker {
 
 struct GatewayState {
     frame: FrameHandle,
-    rpc: RpcManager,
     redis: xredis::Client,
     sessions: ClientSessions,
     token: TokenCoder,

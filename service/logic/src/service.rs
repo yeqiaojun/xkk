@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    io,
     path::PathBuf,
     sync::{
         Arc,
@@ -27,23 +26,15 @@ const METRICS_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 #[derive(Debug, Error)]
 pub enum ServiceError {
     #[error(transparent)]
+    App(#[from] xkk_app::Error),
+    #[error(transparent)]
     Config(#[from] xkk_config::ConfigError),
     #[error(transparent)]
     Frame(#[from] xframe::Error),
     #[error(transparent)]
-    Log(#[from] xlog::Error),
-    #[error("close Logic log worker: {0}")]
-    LogClose(#[source] io::Error),
-    #[error(transparent)]
-    Mongo(#[from] xmongo::Error),
-    #[error(transparent)]
     Persist(#[from] xkk_persist::Error),
     #[error(transparent)]
-    Redis(#[from] xredis::Error),
-    #[error(transparent)]
     Rpc(#[from] xframe::xrpc::Error),
-    #[error(transparent)]
-    Protocol(#[from] xkk_protocol::ProtocolError),
 }
 
 fn service_config(config: &Config) -> Result<ServiceConfig, ServiceError> {
@@ -84,68 +75,47 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
     let logic_config = logic_config();
     let cluster = config.node.cluster.clone();
     let instance_id = config.node.instance_id;
-    let log_guard = xlog::init_global(log_options)?;
-
-    let service: Result<(), ServiceError> = async {
-        xkk_common::service_type::init();
-        xkk_protocol::init_global_registry()?;
-        let redis = xredis::Client::connect_config(xredis::RedisConfig::new(&config.infrastructure.redis_dsn)?).await?;
-        let mongo = match xmongo::Client::connect_config(xmongo::Config::new(&config.infrastructure.mongo_dsn)?).await {
-            Ok(mongo) => mongo,
-            Err(error) => {
-                redis.close();
-                return Err(error.into());
-            }
-        };
-        let result: Result<(), ServiceError> = async {
-            let prepared = xframe::prepare(service_config).await?;
-            let handle = prepared.handle();
-            let database = xkk_persist::Database::new(mongo.clone())?;
-            let application_redis = redis.clone();
-            let login_metrics = Arc::new(LoginMetrics::default());
-            let runtime = LogicRuntime::new(logic_config, player::persistence(database.players(), login_metrics.clone()));
-            let online_count = Arc::new(AtomicI32::new(0));
-            player::register_handlers(
-                prepared.rpc(),
-                handle,
-                redis.clone(),
-                runtime.clone(),
+    xkk_app::run(log_options, &config.infrastructure, |resources| async move {
+        let xkk_app::Resources { mongo, redis } = resources;
+        let prepared = xframe::prepare(service_config).await?;
+        let handle = prepared.handle();
+        let database = xkk_persist::Database::new(mongo.clone())?;
+        let application_redis = redis.clone();
+        let login_metrics = Arc::new(LoginMetrics::default());
+        let runtime = LogicRuntime::new(logic_config, player::persistence(database.players(), login_metrics.clone()));
+        let online_count = Arc::new(AtomicI32::new(0));
+        player::register_handlers(
+            prepared.rpc(),
+            handle,
+            redis.clone(),
+            runtime.clone(),
+            instance_id,
+            online_count.clone(),
+            RPC_CALL_TIMEOUT,
+            login_metrics.clone(),
+        )?;
+        let frame = prepared
+            .start(LogicApplication {
+                cluster,
                 instance_id,
-                online_count.clone(),
-                RPC_CALL_TIMEOUT,
-                login_metrics.clone(),
-            )?;
-            let frame = prepared
-                .start(LogicApplication {
-                    cluster,
-                    instance_id,
-                    redis: application_redis,
-                    service_load_interval: SERVICE_LOAD_PUBLISH_INTERVAL,
-                    metrics_interval: METRICS_REPORT_INTERVAL,
-                    logic_config,
-                    runtime,
-                    online_count,
-                    login_metrics,
-                    service_load_task: None,
-                    metrics_task: None,
-                })
-                .await?;
-            tracing::info!(instance_id, "Logic service started");
-            let shutdown = frame.run_until_shutdown_signal().await;
-            tracing::info!(instance_id, success = shutdown.is_ok(), "Logic service stopped");
-            shutdown?;
-            Ok(())
-        }
-        .await;
-        mongo.shutdown().await;
-        redis.close();
-        result
-    }
-    .await;
-    let log_close = log_guard.close().await;
-    service?;
-    log_close.map_err(ServiceError::LogClose)?;
-    Ok(())
+                redis: application_redis,
+                service_load_interval: SERVICE_LOAD_PUBLISH_INTERVAL,
+                metrics_interval: METRICS_REPORT_INTERVAL,
+                logic_config,
+                runtime,
+                online_count,
+                login_metrics,
+                service_load_task: None,
+                metrics_task: None,
+            })
+            .await?;
+        tracing::info!(instance_id, "Logic service started");
+        let shutdown = frame.run_until_shutdown_signal().await;
+        tracing::info!(instance_id, success = shutdown.is_ok(), "Logic service stopped");
+        shutdown?;
+        Ok(())
+    })
+    .await
 }
 
 struct LogicApplication {

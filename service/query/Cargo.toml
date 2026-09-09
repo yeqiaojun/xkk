@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+xkk-app.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -12,6 +13,3 @@ xkk-config.workspace = true
 xkk-persist.workspace = true
 xkk-protocol.workspace = true
 xframe.workspace = true
-xlog.workspace = true
-xmongo.workspace = true
-xredis.workspace = true

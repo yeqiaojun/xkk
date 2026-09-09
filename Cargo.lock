@@ -3792,6 +3792,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "xkk-app"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "xkk-common",
+ "xkk-config",
+ "xkk-protocol",
+ "xlog",
+ "xmongo",
+ "xredis",
+]
+
+[[package]]
 name = "xkk-auth"
 version = "0.1.0"
 dependencies = [
@@ -3800,13 +3813,12 @@ dependencies = [
  "tracing",
  "xfastid",
  "xframe",
+ "xkk-app",
  "xkk-cache",
  "xkk-common",
  "xkk-config",
  "xkk-persist",
  "xkk-protocol",
- "xlog",
- "xmongo",
  "xredis",
  "xtoken",
  "xutil",
@@ -3860,13 +3872,12 @@ dependencies = [
  "tokio",
  "tracing",
  "xframe",
+ "xkk-app",
  "xkk-cache",
  "xkk-common",
  "xkk-config",
  "xkk-persist",
  "xkk-protocol",
- "xlog",
- "xmongo",
  "xredis",
  "xtoken",
  "xutil",
@@ -3881,12 +3892,12 @@ dependencies = [
  "tokio",
  "tracing",
  "xframe",
+ "xkk-app",
  "xkk-cache",
  "xkk-common",
  "xkk-config",
  "xkk-persist",
  "xkk-protocol",
- "xlog",
  "xlru",
  "xmongo",
  "xredis",
@@ -3930,13 +3941,12 @@ dependencies = [
  "tracing",
  "xfastid",
  "xframe",
+ "xkk-app",
  "xkk-cache",
  "xkk-common",
  "xkk-config",
  "xkk-persist",
  "xkk-protocol",
- "xlog",
- "xmongo",
  "xredis",
 ]
 
@@ -3948,13 +3958,11 @@ dependencies = [
  "tokio",
  "tracing",
  "xframe",
+ "xkk-app",
  "xkk-common",
  "xkk-config",
  "xkk-persist",
  "xkk-protocol",
- "xlog",
- "xmongo",
- "xredis",
 ]
 
 [[package]]
@@ -3996,6 +4004,7 @@ name = "xlru"
 version = "0.1.0"
 dependencies = [
  "tokio",
+ "tracing",
 ]
 
 [[package]]

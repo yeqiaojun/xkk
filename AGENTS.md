@@ -10,7 +10,7 @@
 - `cache` owns shared Redis protocols and depends directly on xredis; it must not know FrameHandle
   or mutate xservice. `persist` owns the Mongo collection catalog and shared model access, and `common` contains
   infrastructure-free helpers.
-- Do not introduce a shared bootstrap crate until repeated application behavior exists beyond `xframe`.
+- `app` owns the repeated process setup shared by all five services: logging, protocol initialization, Mongo/Redis clients, and reverse-order cleanup. It does not own frame composition, service topology, business state, or a global resource accessor.
 - All services connect etcd, Mongo, and Redis before admission and register their real published endpoint.
 
 ## Module Organization

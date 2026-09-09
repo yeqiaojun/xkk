@@ -59,7 +59,6 @@ impl<E> std::error::Error for LogicCallError<E> where E: std::error::Error + 'st
 #[derive(Debug)]
 pub enum ShutdownError<E> {
     Persistence(Arc<E>),
-    PendingBudgetExceeded { capacity: usize },
     DirtyPlayers(u64),
 }
 
@@ -67,9 +66,6 @@ impl<E: fmt::Display> fmt::Display for ShutdownError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Persistence(error) => write!(f, "logic runtime flush failed: {error}"),
-            Self::PendingBudgetExceeded { capacity } => {
-                write!(f, "logic runtime flush pending-entry budget exceeded (capacity {capacity})")
-            }
             Self::DirtyPlayers(count) => {
                 write!(f, "logic runtime flush left {count} dirty players")
             }
@@ -998,9 +994,6 @@ where
             Err(CacheError::Save(error) | CacheError::Load(error)) => {
                 return Err(ShutdownError::Persistence(error));
             }
-            Err(CacheError::PendingBudgetExceeded { capacity }) => {
-                return Err(ShutdownError::PendingBudgetExceeded { capacity });
-            }
             Err(CacheError::MissingLoader | CacheError::MissingSaver) => {
                 unreachable!("logic runtime cache persistence callbacks are always configured");
             }
@@ -1045,7 +1038,6 @@ fn map_cache_error<E>(error: CacheError<E>) -> LogicCallError<E> {
     match error {
         CacheError::Load(error) => LogicCallError::Load(error),
         CacheError::Save(error) => LogicCallError::Persistence(error),
-        CacheError::PendingBudgetExceeded { .. } => LogicCallError::DirtyCapacity,
         CacheError::MissingLoader | CacheError::MissingSaver => {
             unreachable!("logic runtime cache persistence callbacks are always configured")
         }

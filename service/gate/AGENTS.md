@@ -17,7 +17,8 @@
   previous Gate session. A gap fails resume and requires a fresh login.
 - External handshake/session admission and write queues must remain explicitly bounded.
 - Shutdown stops client admission, awaits workers, drains resumable state, notifies Logic, and
-  conditionally clears Redis session ownership.
+  conditionally clears Redis session ownership. Cleanup notifications use the same FrameHandle
+  as normal sends; Stopping does not disable the outbound drain path.
 
 ## Future Work
 

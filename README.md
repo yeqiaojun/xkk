@@ -67,3 +67,15 @@ Replace the shared DSNs in `common.yaml`, and select the desired instance YAML e
 Mongo DSNs must include the database. `version.json` supplies
 the configuration version; builds may inject the program version with `XKK_PRO_VERSION` and
 otherwise use `0`.
+
+## Process composition
+
+`xkk-app` owns the shared logging/protocol initialization and Mongo/Redis resource lifetime.
+Each service still owns its `service_config`, listeners, watches and `Application` implementation.
+It passes a service future to `xkk_app::run`; that future awaits frame shutdown before shared
+clients and logging are closed. There is no global resource accessor.
+
+During shutdown xframe rejects incoming work, drains timers/HTTP/RPC handlers, then invokes
+business cleanup and final persistence. Existing work and Gate cleanup can use the normal
+FrameHandle for downstream calls while Stopping. Public's periodic save task uses a cooperative stop signal, so an active save completes before
+the final flush. Its interval remains based on monotonic time, independent of GM time changes.

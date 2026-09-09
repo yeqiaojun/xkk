@@ -1,7 +1,7 @@
-use std::{collections::HashMap, io, path::PathBuf, time::Duration};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 
 use thiserror::Error;
-use tokio::task::JoinHandle;
+use tokio::{sync::oneshot, task::JoinHandle};
 use xframe::{Application, ApplicationResult, DiscoveryConfig, FrameHandle, NodeConfig, RpcConfig, ServiceConfig};
 use xkk_persist::PublicPlayers;
 
@@ -18,23 +18,15 @@ const PLAYER_SAVE_INTERVAL: Duration = Duration::from_secs(2 * 60);
 #[derive(Debug, Error)]
 pub enum ServiceError {
     #[error(transparent)]
+    App(#[from] xkk_app::Error),
+    #[error(transparent)]
     Config(#[from] xkk_config::ConfigError),
     #[error(transparent)]
     Frame(#[from] xframe::Error),
     #[error(transparent)]
-    Log(#[from] xlog::Error),
-    #[error("close Public log worker: {0}")]
-    LogClose(#[source] io::Error),
-    #[error(transparent)]
-    Mongo(#[from] xmongo::Error),
-    #[error(transparent)]
     Persist(#[from] xkk_persist::Error),
     #[error(transparent)]
-    Redis(#[from] xredis::Error),
-    #[error(transparent)]
     Rpc(#[from] xframe::xrpc::Error),
-    #[error(transparent)]
-    Protocol(#[from] xkk_protocol::ProtocolError),
 }
 
 fn service_config(config: &Config) -> Result<ServiceConfig, ServiceError> {
@@ -69,49 +61,28 @@ pub async fn run(config: Config) -> Result<(), ServiceError> {
     let log_options = config.log.options("logs/public.log");
     let service_config = service_config(&config)?;
     let instance_id = config.node.instance_id;
-    let log_guard = xlog::init_global(log_options)?;
-
-    let service: Result<(), ServiceError> = async {
-        xkk_common::service_type::init();
-        xkk_protocol::init_global_registry()?;
-        let redis = xredis::Client::connect_config(xredis::RedisConfig::new(&config.infrastructure.redis_dsn)?).await?;
-        let mongo = match xmongo::Client::connect_config(xmongo::Config::new(&config.infrastructure.mongo_dsn)?).await {
-            Ok(mongo) => mongo,
-            Err(error) => {
-                redis.close();
-                return Err(error.into());
-            }
-        };
-        let result: Result<(), ServiceError> = async {
-            let prepared = xframe::prepare(service_config).await?;
-            let handle = prepared.handle();
-            let database = xkk_persist::Database::new(mongo.clone())?;
-            let players = PublicPlayers::new(database.public_players());
-            let mail = MailService::new(handle, redis.clone(), players.clone());
-            mail.register_handlers(prepared.rpc())?;
-            let frame = prepared.start(PublicApplication::new(players, METRICS_REPORT_INTERVAL)).await?;
-            tracing::info!(instance_id, "Public service started");
-            let shutdown = frame.run_until_shutdown_signal().await;
-            tracing::info!(instance_id, success = shutdown.is_ok(), "Public service stopped");
-            shutdown?;
-            Ok(())
-        }
-        .await;
-        mongo.shutdown().await;
-        redis.close();
-        result
-    }
-    .await;
-    let log_close = log_guard.close().await;
-    service?;
-    log_close.map_err(ServiceError::LogClose)?;
-    Ok(())
+    xkk_app::run(log_options, &config.infrastructure, |resources| async move {
+        let xkk_app::Resources { mongo, redis } = resources;
+        let prepared = xframe::prepare(service_config).await?;
+        let handle = prepared.handle();
+        let database = xkk_persist::Database::new(mongo.clone())?;
+        let players = PublicPlayers::new(database.public_players());
+        let mail = MailService::new(handle, redis.clone(), players.clone());
+        mail.register_handlers(prepared.rpc())?;
+        let frame = prepared.start(PublicApplication::new(players, METRICS_REPORT_INTERVAL)).await?;
+        tracing::info!(instance_id, "Public service started");
+        let shutdown = frame.run_until_shutdown_signal().await;
+        tracing::info!(instance_id, success = shutdown.is_ok(), "Public service stopped");
+        shutdown?;
+        Ok(())
+    })
+    .await
 }
 
 struct PublicApplication {
     players: PublicPlayers,
     metrics_interval: Duration,
-    save_task: Option<JoinHandle<()>>,
+    save_task: Option<(oneshot::Sender<()>, JoinHandle<()>)>,
     metrics_task: Option<JoinHandle<()>>,
 }
 
@@ -131,7 +102,12 @@ impl Application for PublicApplication {
     }
 
     async fn shutdown(&mut self, _frame: FrameHandle) -> ApplicationResult {
-        stop_task(&mut self.save_task, "Public player save").await;
+        if let Some((stop, task)) = self.save_task.take() {
+            let _ = stop.send(());
+            if let Err(error) = task.await {
+                tracing::error!(%error, "Public periodic save task failed during shutdown");
+            }
+        }
         match self.players.flush_dirty().await {
             Ok(players) => tracing::info!(players, "Public dirty players flushed at shutdown"),
             Err(error) => {
@@ -143,19 +119,27 @@ impl Application for PublicApplication {
     }
 }
 
-fn spawn_player_save(players: PublicPlayers, interval: Duration) -> JoinHandle<()> {
-    tokio::spawn(async move {
+// Persistence uses monotonic wall time rather than the GM-adjusted gameplay clock.
+// The stop signal is observed between flushes, never by cancelling a flush future.
+fn spawn_player_save(players: PublicPlayers, interval: Duration) -> (oneshot::Sender<()>, JoinHandle<()>) {
+    let (stop, mut stopped) = oneshot::channel();
+    let task = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(interval);
         ticker.tick().await;
         loop {
-            ticker.tick().await;
+            tokio::select! {
+                biased;
+                _ = &mut stopped => break,
+                _ = ticker.tick() => {},
+            }
             match players.flush_dirty().await {
                 Ok(0) => {}
                 Ok(count) => tracing::info!(players = count, "Public dirty players flushed"),
                 Err(error) => tracing::error!(%error, "Public dirty player flush failed"),
             }
         }
-    })
+    });
+    (stop, task)
 }
 
 async fn stop_task(task: &mut Option<JoinHandle<()>>, name: &'static str) {

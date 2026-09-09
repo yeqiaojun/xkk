@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "app",
     "cache",
     "common",
     "config",
@@ -41,6 +42,7 @@ xframe = { path = "../deps-rust/xframe" }
 xlog = { path = "../deps-rust/xlog" }
 xlru = { path = "../deps-rust/xlru" }
 xmongo = { path = "../deps-rust/xmongo" }
+xkk-app = { path = "app" }
 xkk-protocol = { path = "protocol" }
 xkk-cache = { path = "cache" }
 xkk-common = { path = "common" }
