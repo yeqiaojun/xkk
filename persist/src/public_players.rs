@@ -99,6 +99,9 @@ impl PublicPlayers {
                 let metrics = single_metrics.clone();
                 let dirty = single_dirty.clone();
                 async move {
+                    if player.is_dirty() {
+                        tracing::warn!(gid, "Public cache removed dirty player; attempting fallback save");
+                    }
                     save_single(&store, &metrics, gid, &player).await;
                     player.remove_registration_if_clean(|| {
                         dirty.remove(&gid);

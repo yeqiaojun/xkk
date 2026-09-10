@@ -555,6 +555,9 @@ where
                 let dirty_admission = save_dirty_admission.clone();
                 async move {
                     let _save = player.save_gate.lock().await;
+                    if player.dirty() {
+                        tracing::warn!(gid, "Logic cache fallback save found dirty player");
+                    }
                     save_one(&persistence, &stats, &dirty_admission, gid, &player).await
                 }
             });
